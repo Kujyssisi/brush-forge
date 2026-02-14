@@ -1,0 +1,73 @@
+[gd_resource type="ShaderMaterial" format=3 uid="uid://ndm153cu3gjv"]
+
+[ext_resource type="Shader" path="res://addons/brush_forge_editor/helpers/VertexTexture.gdshader" id="1_jrw1p"]
+[ext_resource type="Texture2D" uid="uid://br85e76vxf5dc" path="res://addons/brush_forge_editor/helpers/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_Displacement.jpg" id="2_ya8ex"]
+[ext_resource type="Texture2D" uid="uid://dlfbvx5flltkk" path="res://addons/brush_forge_editor/helpers/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_Color.jpg" id="3_jk0y3"]
+[ext_resource type="Texture2D" uid="uid://cdj87c02y2rvw" path="res://addons/brush_forge_editor/helpers/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_AmbientOcclusion.jpg" id="4_tob4f"]
+[ext_resource type="Texture2D" uid="uid://c1o4efrxfhc0i" path="res://addons/brush_forge_editor/helpers/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_NormalGL.jpg" id="5_86wes"]
+[ext_resource type="Texture2D" uid="uid://d1gk6to74iocn" path="res://addons/brush_forge_editor/helpers/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_Roughness.jpg" id="6_dyj8k"]
+[ext_resource type="Texture2D" uid="uid://c86quhk3rrwhv" path="res://addons/brush_forge_editor/helpers/Textures/Concrete034_2K-PNG/Concrete034_2K-PNG_Color.png" id="7_j46r8"]
+[ext_resource type="Texture2D" uid="uid://bny4liw5kkkhn" path="res://addons/brush_forge_editor/helpers/Textures/Concrete034_2K-PNG/Concrete034_2K-PNG_NormalGL.png" id="8_l5n77"]
+[ext_resource type="Texture2D" uid="uid://bxpqrqfdyknma" path="res://addons/brush_forge_editor/helpers/Textures/Concrete034_2K-PNG/Concrete034_2K-PNG_Roughness.png" id="9_rfk16"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_63ct3"]
+noise_type = 4
+frequency = 0.0252
+domain_warp_enabled = true
+domain_warp_type = 1
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_obt1j"]
+noise = SubResource("FastNoiseLite_63ct3")
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_jrw1p")
+shader_parameter/use_texture_black = true
+shader_parameter/texture_black_albedo = ExtResource("3_jk0y3")
+shader_parameter/texture_black_color = Color(1, 1, 1, 1)
+shader_parameter/texture_black_ao = ExtResource("4_tob4f")
+shader_parameter/texture_black_ao_intensity = 1.0
+shader_parameter/texture_black_metallic_intensity = 0.0
+shader_parameter/texture_black_roughness = ExtResource("6_dyj8k")
+shader_parameter/texture_black_roughness_intensity = 1.0
+shader_parameter/texture_black_normal = ExtResource("5_86wes")
+shader_parameter/texture_black_normal_intensity = 1.0
+shader_parameter/texture_black_scale = Vector2(2, 2)
+shader_parameter/use_texture_r = true
+shader_parameter/texture_r_albedo = ExtResource("7_j46r8")
+shader_parameter/texture_r_color = Color(1, 1, 1, 1)
+shader_parameter/texture_r_ao_intensity = 1.0
+shader_parameter/texture_r_metallic_intensity = 0.0
+shader_parameter/texture_r_roughness = ExtResource("9_rfk16")
+shader_parameter/texture_r_roughness_intensity = 1.0
+shader_parameter/texture_r_normal = ExtResource("8_l5n77")
+shader_parameter/texture_r_normal_intensity = 1.0
+shader_parameter/texture_r_scale = Vector2(1, 1)
+shader_parameter/use_texture_g = false
+shader_parameter/texture_g_color = Color(1, 1, 1, 1)
+shader_parameter/texture_g_ao_intensity = 1.0
+shader_parameter/texture_g_metallic_intensity = 1.0
+shader_parameter/texture_g_roughness_intensity = 1.0
+shader_parameter/texture_g_normal_intensity = 1.0
+shader_parameter/texture_g_scale = Vector2(1, 1)
+shader_parameter/use_texture_b = false
+shader_parameter/texture_b_color = Color(1, 1, 1, 1)
+shader_parameter/texture_b_ao_intensity = 1.0
+shader_parameter/texture_b_metallic_intensity = 1.0
+shader_parameter/texture_b_roughness_intensity = 1.0
+shader_parameter/texture_b_normal_intensity = 1.0
+shader_parameter/texture_b_scale = Vector2(1, 1)
+shader_parameter/use_texture_white = false
+shader_parameter/texture_white_color = Color(1, 1, 1, 1)
+shader_parameter/texture_white_ao_intensity = 1.0
+shader_parameter/texture_white_metallic_intensity = 1.0
+shader_parameter/texture_white_roughness_intensity = 1.0
+shader_parameter/texture_white_normal_intensity = 1.0
+shader_parameter/texture_white_scale = Vector2(1, 1)
+shader_parameter/use_noise_blending = true
+shader_parameter/blend_noise_texture = SubResource("NoiseTexture2D_obt1j")
+shader_parameter/blend_height_texture = ExtResource("2_ya8ex")
+shader_parameter/blend_height_intensity = 20.0
+shader_parameter/contrast0 = 2.425
+shader_parameter/blend_noise_scale = Vector2(2, 2)
+shader_parameter/blend_height_scale = Vector2(2, 2)
