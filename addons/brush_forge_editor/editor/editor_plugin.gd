@@ -1028,9 +1028,6 @@ func _on_paint_tool_toggled(enabled: bool) -> void:
 			return
 		_set_plugin_active(true)
 	if enabled:
-		if move_brush_button == null or not move_brush_button.button_pressed or selected_brush_index < 0:
-			paint_tool_button.button_pressed = false
-			return
 		if clip_tool_button != null and clip_tool_button.button_pressed:
 			clip_tool_button.button_pressed = false
 		if vertex_tool_button != null and vertex_tool_button.button_pressed:
@@ -1041,17 +1038,17 @@ func _on_paint_tool_toggled(enabled: bool) -> void:
 			face_tool_button.button_pressed = false
 		if rotate_tool_button != null and rotate_tool_button.button_pressed:
 			rotate_tool_button.button_pressed = false
+		if texture_tool_button != null and texture_tool_button.button_pressed:
+			texture_tool_button.button_pressed = false
 		if subdivide_tool_button != null and subdivide_tool_button.button_pressed:
 			subdivide_tool_button.button_pressed = false
-			if texture_tool_button != null and texture_tool_button.button_pressed:
-				texture_tool_button.button_pressed = false
-			_refresh_uv_controls_from_selection()
-			_set_mesh_vertex_preview(true)
-		else:
-			paint_drag_active = false
-			paint_last_stamp = INVALID_STAMP_POINT
-			paint_hover_valid = false
-		_update_gizmos()
+		_refresh_uv_controls_from_selection()
+		_set_mesh_vertex_preview(true)
+	else:
+		paint_drag_active = false
+		paint_last_stamp = INVALID_STAMP_POINT
+		paint_hover_valid = false
+	_update_gizmos()
 
 func _on_subdivide_tool_toggled(enabled: bool) -> void:
 	if not plugin_active and enabled:
@@ -1060,9 +1057,6 @@ func _on_subdivide_tool_toggled(enabled: bool) -> void:
 			return
 		_set_plugin_active(true)
 	if enabled:
-		if move_brush_button == null or not move_brush_button.button_pressed or selected_brush_index < 0:
-			subdivide_tool_button.button_pressed = false
-			return
 		if clip_tool_button != null and clip_tool_button.button_pressed:
 			clip_tool_button.button_pressed = false
 		if vertex_tool_button != null and vertex_tool_button.button_pressed:
@@ -3182,12 +3176,12 @@ func _update_tool_button_states() -> void:
 		if not can_use_move_subtools and rotate_tool_button.button_pressed:
 			rotate_tool_button.button_pressed = false
 	if paint_tool_button != null:
-		paint_tool_button.disabled = not can_use_move_subtools
-		if not can_use_move_subtools and paint_tool_button.button_pressed:
+		paint_tool_button.disabled = not plugin_active
+		if not plugin_active and paint_tool_button.button_pressed:
 			paint_tool_button.button_pressed = false
 	if subdivide_tool_button != null:
-		subdivide_tool_button.disabled = not can_use_move_subtools
-		if not can_use_move_subtools and subdivide_tool_button.button_pressed:
+		subdivide_tool_button.disabled = not plugin_active
+		if not plugin_active and subdivide_tool_button.button_pressed:
 			subdivide_tool_button.button_pressed = false
 	if texture_tool_button != null:
 		texture_tool_button.disabled = not plugin_active
@@ -3500,32 +3494,51 @@ func _update_face_extrude(axis_delta: float) -> void:
 	var start_plane: NeoPlane = face_drag_start_planes[face_drag_face_index] as NeoPlane
 	if start_plane == null:
 		return
+	var meshes := _get_brush_meshes()
+	if face_drag_extrude_index < 0 or face_drag_extrude_index >= map_node.brush_data.size():
+		return
+	var extrude_brush: BrushForge = map_node.brush_data[face_drag_extrude_index] as BrushForge
+	if extrude_brush == null:
+		return
+
+	# Outward drag: true extrusion. Inward drag: loop-cut split.
+	if axis_delta >= 0.0:
+		if selected_brush_index >= 0 and selected_brush_index < meshes.size():
+			var src_mesh := meshes[selected_brush_index]
+			var src_brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
+			if src_mesh != null and src_brush != null:
+				_restore_brush_planes_from_snapshot(src_brush, face_drag_start_planes)
+				_refresh_brush_bounds_from_planes(src_brush, src_mesh)
+		_restore_brush_planes_from_snapshot(extrude_brush, face_drag_start_planes)
+		extrude_brush.planes[face_drag_face_index] = NeoPlane.new(start_plane.normal, start_plane.distance + axis_delta)
+		extrude_brush.planes.append(NeoPlane.new(-start_plane.normal, -start_plane.distance))
+		if face_drag_extrude_index >= 0 and face_drag_extrude_index < meshes.size():
+			var mesh_out := meshes[face_drag_extrude_index]
+			if mesh_out != null:
+				_refresh_brush_bounds_from_planes(extrude_brush, mesh_out)
+		_update_gizmos()
+		return
+
 	var cut_depth := maxf(absf(axis_delta), grid_size)
 	var max_cut_depth := _max_cut_depth_from_snapshot(selected_brush_index, face_drag_face_index, face_drag_start_planes)
 	if max_cut_depth <= 0.0:
 		return
 	cut_depth = minf(cut_depth, max_cut_depth)
 	var cut_distance := start_plane.distance - cut_depth
-	var meshes := _get_brush_meshes()
 	if selected_brush_index >= 0 and selected_brush_index < meshes.size():
 		var src_mesh := meshes[selected_brush_index]
-		var src_brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
-		if src_mesh != null and src_brush != null:
-			_restore_brush_planes_from_snapshot(src_brush, face_drag_start_planes)
-			src_brush.planes[face_drag_face_index] = NeoPlane.new(start_plane.normal, cut_distance)
-			_refresh_brush_bounds_from_planes(src_brush, src_mesh)
-	if face_drag_extrude_index < 0 or face_drag_extrude_index >= map_node.brush_data.size():
-		return
-	var extrude_brush: BrushForge = map_node.brush_data[face_drag_extrude_index] as BrushForge
-	if extrude_brush == null:
-		return
+		var src_brush2: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
+		if src_mesh != null and src_brush2 != null:
+			_restore_brush_planes_from_snapshot(src_brush2, face_drag_start_planes)
+			src_brush2.planes[face_drag_face_index] = NeoPlane.new(start_plane.normal, cut_distance)
+			_refresh_brush_bounds_from_planes(src_brush2, src_mesh)
 	_restore_brush_planes_from_snapshot(extrude_brush, face_drag_start_planes)
 	extrude_brush.planes[face_drag_face_index] = NeoPlane.new(start_plane.normal, start_plane.distance)
 	extrude_brush.planes.append(NeoPlane.new(-start_plane.normal, -cut_distance))
 	if face_drag_extrude_index >= 0 and face_drag_extrude_index < meshes.size():
-		var mesh := meshes[face_drag_extrude_index]
-		if mesh != null:
-			_refresh_brush_bounds_from_planes(extrude_brush, mesh)
+		var mesh_in := meshes[face_drag_extrude_index]
+		if mesh_in != null:
+			_refresh_brush_bounds_from_planes(extrude_brush, mesh_in)
 	_update_gizmos()
 
 func _max_cut_depth_from_snapshot(brush_index: int, face_index: int, snapshot: Array) -> float:
