@@ -73,6 +73,7 @@ var face_drag_sign := 1.0
 var face_drag_face_index := -1
 var face_drag_ctrl_mode := false
 var face_drag_extrude_index := -1
+var face_drag_start_planes: Array = []
 var pending_click_active := false
 var pending_click_pick: Dictionary = {}
 var pending_click_mouse := Vector2.ZERO
@@ -143,6 +144,7 @@ var subdivide_grid_gizmo: MeshInstance3D
 var rotate_gizmo: MeshInstance3D
 var red_gizmo_material: StandardMaterial3D
 var yellow_gizmo_material: StandardMaterial3D
+var purple_face_gizmo_material: StandardMaterial3D
 var edge_gizmo_material: StandardMaterial3D
 var paint_brush_gizmo_material: StandardMaterial3D
 var subdivide_outline_material: StandardMaterial3D
@@ -3411,90 +3413,41 @@ func _begin_face_drag(mouse_pos: Vector2, face_index: int, ctrl_pressed: bool = 
 	face_drag_face_index = face_index
 	face_drag_start_center = selected_mesh.position
 	face_drag_start_size = brush.size
+	face_drag_start_planes = _clone_plane_array(brush.planes)
 	drag_start_mouse = mouse_pos
-	match face_index:
-		0:
-			face_drag_axis = Vector3.RIGHT
-			face_drag_sign = 1.0
-		1:
-			face_drag_axis = Vector3.RIGHT
-			face_drag_sign = -1.0
-		2:
-			face_drag_axis = Vector3.UP
-			face_drag_sign = 1.0
-		3:
-			face_drag_axis = Vector3.UP
-			face_drag_sign = -1.0
-		4:
-			face_drag_axis = Vector3.BACK
-			face_drag_sign = 1.0
-		5:
-			face_drag_axis = Vector3.BACK
-			face_drag_sign = -1.0
-		_:
-			face_drag_axis = Vector3.ZERO
-			face_drag_active = false
+	if face_index < 0 or face_index >= brush.planes.size():
+		face_drag_axis = Vector3.ZERO
+		face_drag_active = false
+		return
+	var p: NeoPlane = brush.planes[face_index] as NeoPlane
+	if p == null:
+		face_drag_axis = Vector3.ZERO
+		face_drag_active = false
+		return
+	face_drag_axis = p.normal.normalized()
+	face_drag_sign = 1.0
 
 func _update_face_drag(camera: Camera3D, mouse_pos: Vector2) -> void:
 	if not face_drag_active:
 		return
 	if selected_mesh == null or selected_brush_index < 0:
 		return
+	if selected_brush_index >= map_node.brush_data.size():
+		return
+	if face_drag_face_index < 0:
+		return
 
 	var axis_delta := _axis_delta_from_mouse(camera, face_drag_start_center, face_drag_axis, mouse_pos)
-	var axis_delta_snapped := _snap_float(axis_delta, grid_size)
+	var axis_delta_snapped := _snap_float(axis_delta * face_drag_sign, grid_size)
 	if absf(axis_delta_snapped) < 0.0001:
 		return
 
 	if face_drag_ctrl_mode:
 		_update_face_extrude(axis_delta_snapped)
+		_update_gizmos()
 		return
-
-	if face_drag_axis == Vector3.RIGHT:
-		var min_v := face_drag_start_center.x - face_drag_start_size.x * 0.5
-		var max_v := face_drag_start_center.x + face_drag_start_size.x * 0.5
-		if face_drag_sign > 0.0:
-			max_v += axis_delta_snapped
-		else:
-			min_v += axis_delta_snapped
-		min_v = _snap_float(min_v, grid_size)
-		max_v = _snap_float(max_v, grid_size)
-		if max_v - min_v < grid_size:
-			if face_drag_sign > 0.0:
-				max_v = min_v + grid_size
-			else:
-				min_v = max_v - grid_size
-		_apply_selected_face_plane_by_bounds(0, min_v, max_v, face_drag_sign)
-	elif face_drag_axis == Vector3.UP:
-		var min_v := face_drag_start_center.y - face_drag_start_size.y * 0.5
-		var max_v := face_drag_start_center.y + face_drag_start_size.y * 0.5
-		if face_drag_sign > 0.0:
-			max_v += axis_delta_snapped
-		else:
-			min_v += axis_delta_snapped
-		min_v = _snap_float(min_v, grid_size)
-		max_v = _snap_float(max_v, grid_size)
-		if max_v - min_v < grid_size:
-			if face_drag_sign > 0.0:
-				max_v = min_v + grid_size
-			else:
-				min_v = max_v - grid_size
-		_apply_selected_face_plane_by_bounds(1, min_v, max_v, face_drag_sign)
-	else:
-		var min_v := face_drag_start_center.z - face_drag_start_size.z * 0.5
-		var max_v := face_drag_start_center.z + face_drag_start_size.z * 0.5
-		if face_drag_sign > 0.0:
-			max_v += axis_delta_snapped
-		else:
-			min_v += axis_delta_snapped
-		min_v = _snap_float(min_v, grid_size)
-		max_v = _snap_float(max_v, grid_size)
-		if max_v - min_v < grid_size:
-			if face_drag_sign > 0.0:
-				max_v = min_v + grid_size
-			else:
-				min_v = max_v - grid_size
-		_apply_selected_face_plane_by_bounds(2, min_v, max_v, face_drag_sign)
+	_apply_face_plane_delta_from_snapshot(selected_brush_index, face_drag_face_index, axis_delta_snapped, face_drag_start_planes)
+	_update_gizmos()
 
 func _apply_selected_face_plane_by_bounds(axis_id: int, min_v: float, max_v: float, sign: float) -> void:
 	if selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size():
@@ -3538,68 +3491,83 @@ func _apply_selected_face_plane_by_bounds(axis_id: int, min_v: float, max_v: flo
 func _update_face_extrude(axis_delta: float) -> void:
 	if selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size():
 		return
+	if face_drag_face_index < 0 or face_drag_start_planes.is_empty():
+		return
 	if face_drag_extrude_index == -1:
 		face_drag_extrude_index = _create_extrude_brush_from_selected()
 		if face_drag_extrude_index == -1:
 			return
-
-	var base_min := 0.0
-	var base_max := 0.0
-	var axis_id := 0
-	if face_drag_axis == Vector3.RIGHT:
-		axis_id = 0
-		base_min = face_drag_start_center.x - face_drag_start_size.x * 0.5
-		base_max = face_drag_start_center.x + face_drag_start_size.x * 0.5
-	elif face_drag_axis == Vector3.UP:
-		axis_id = 1
-		base_min = face_drag_start_center.y - face_drag_start_size.y * 0.5
-		base_max = face_drag_start_center.y + face_drag_start_size.y * 0.5
-	else:
-		axis_id = 2
-		base_min = face_drag_start_center.z - face_drag_start_size.z * 0.5
-		base_max = face_drag_start_center.z + face_drag_start_size.z * 0.5
-
-	var face_pos := base_max if face_drag_sign > 0.0 else base_min
-	var moved_face := _snap_float(face_pos + axis_delta, grid_size)
-	var inward := face_drag_sign * (moved_face - face_pos) < 0.0
-
-	var orig_min := base_min
-	var orig_max := base_max
-	if inward:
-		if face_drag_sign > 0.0:
-			orig_max = maxf(moved_face, base_min + grid_size)
-		else:
-			orig_min = minf(moved_face, base_max - grid_size)
-
-	var cut_min := minf(face_pos, moved_face)
-	var cut_max := maxf(face_pos, moved_face)
-	if cut_max - cut_min < grid_size:
-		cut_max = cut_min + grid_size
-
-	var orig_center := face_drag_start_center
-	var orig_size := face_drag_start_size
-	var new_center := face_drag_start_center
-	var new_size := face_drag_start_size
-
-	if axis_id == 0:
-		orig_center.x = (orig_min + orig_max) * 0.5
-		orig_size.x = orig_max - orig_min
-		new_center.x = (cut_min + cut_max) * 0.5
-		new_size.x = cut_max - cut_min
-	elif axis_id == 1:
-		orig_center.y = (orig_min + orig_max) * 0.5
-		orig_size.y = orig_max - orig_min
-		new_center.y = (cut_min + cut_max) * 0.5
-		new_size.y = cut_max - cut_min
-	else:
-		orig_center.z = (orig_min + orig_max) * 0.5
-		orig_size.z = orig_max - orig_min
-		new_center.z = (cut_min + cut_max) * 0.5
-		new_size.z = cut_max - cut_min
-
-	_apply_brush_shape(selected_brush_index, orig_center, orig_size)
-	_apply_brush_shape(face_drag_extrude_index, new_center, new_size)
+	var start_plane: NeoPlane = face_drag_start_planes[face_drag_face_index] as NeoPlane
+	if start_plane == null:
+		return
+	var cut_depth := maxf(absf(axis_delta), grid_size)
+	var max_cut_depth := _max_cut_depth_from_snapshot(selected_brush_index, face_drag_face_index, face_drag_start_planes)
+	if max_cut_depth <= 0.0:
+		return
+	cut_depth = minf(cut_depth, max_cut_depth)
+	var cut_distance := start_plane.distance - cut_depth
+	var meshes := _get_brush_meshes()
+	if selected_brush_index >= 0 and selected_brush_index < meshes.size():
+		var src_mesh := meshes[selected_brush_index]
+		var src_brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
+		if src_mesh != null and src_brush != null:
+			_restore_brush_planes_from_snapshot(src_brush, face_drag_start_planes)
+			src_brush.planes[face_drag_face_index] = NeoPlane.new(start_plane.normal, cut_distance)
+			_refresh_brush_bounds_from_planes(src_brush, src_mesh)
+	if face_drag_extrude_index < 0 or face_drag_extrude_index >= map_node.brush_data.size():
+		return
+	var extrude_brush: BrushForge = map_node.brush_data[face_drag_extrude_index] as BrushForge
+	if extrude_brush == null:
+		return
+	_restore_brush_planes_from_snapshot(extrude_brush, face_drag_start_planes)
+	extrude_brush.planes[face_drag_face_index] = NeoPlane.new(start_plane.normal, start_plane.distance)
+	extrude_brush.planes.append(NeoPlane.new(-start_plane.normal, -cut_distance))
+	if face_drag_extrude_index >= 0 and face_drag_extrude_index < meshes.size():
+		var mesh := meshes[face_drag_extrude_index]
+		if mesh != null:
+			_refresh_brush_bounds_from_planes(extrude_brush, mesh)
 	_update_gizmos()
+
+func _max_cut_depth_from_snapshot(brush_index: int, face_index: int, snapshot: Array) -> float:
+	if brush_index < 0 or brush_index >= map_node.brush_data.size():
+		return 0.0
+	if snapshot.is_empty() or face_index < 0 or face_index >= snapshot.size():
+		return 0.0
+	var base_brush: BrushForge = map_node.brush_data[brush_index] as BrushForge
+	if base_brush == null:
+		return 0.0
+	var temp := BrushForge.create_box(base_brush.position, base_brush.size)
+	_restore_brush_planes_from_snapshot(temp, snapshot)
+	var plane: NeoPlane = snapshot[face_index] as NeoPlane
+	if plane == null:
+		return 0.0
+	var verts := _get_brush_vertices_world(temp)
+	if verts.is_empty():
+		return 0.0
+	var min_proj := INF
+	for v in verts:
+		min_proj = minf(min_proj, plane.normal.dot(v))
+	var available := plane.distance - min_proj - grid_size
+	return maxf(available, 0.0)
+
+func _apply_face_plane_delta_from_snapshot(brush_index: int, face_index: int, delta: float, snapshot: Array) -> void:
+	if brush_index < 0 or brush_index >= map_node.brush_data.size():
+		return
+	if snapshot.is_empty() or face_index < 0 or face_index >= snapshot.size():
+		return
+	var brush: BrushForge = map_node.brush_data[brush_index] as BrushForge
+	if brush == null:
+		return
+	var base_plane: NeoPlane = snapshot[face_index] as NeoPlane
+	if base_plane == null:
+		return
+	_restore_brush_planes_from_snapshot(brush, snapshot)
+	brush.planes[face_index] = NeoPlane.new(base_plane.normal, base_plane.distance + delta)
+	var meshes := _get_brush_meshes()
+	if brush_index >= 0 and brush_index < meshes.size():
+		var mesh := meshes[brush_index]
+		if mesh != null:
+			_refresh_brush_bounds_from_planes(brush, mesh)
 
 func _create_extrude_brush_from_selected() -> int:
 	if selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size():
@@ -4396,6 +4364,11 @@ func _ensure_gizmo_nodes() -> void:
 		yellow_gizmo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		yellow_gizmo_material.albedo_color = Color(1.0, 0.9, 0.1, 1.0)
 		yellow_gizmo_material.no_depth_test = true
+	if purple_face_gizmo_material == null:
+		purple_face_gizmo_material = StandardMaterial3D.new()
+		purple_face_gizmo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		purple_face_gizmo_material.albedo_color = Color(0.72, 0.32, 1.0, 1.0)
+		purple_face_gizmo_material.no_depth_test = true
 	if edge_gizmo_material == null:
 		edge_gizmo_material = StandardMaterial3D.new()
 		edge_gizmo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -4568,6 +4541,7 @@ func _remove_gizmo_nodes() -> void:
 	vertex_selected_gizmo = null
 	red_gizmo_material = null
 	yellow_gizmo_material = null
+	purple_face_gizmo_material = null
 	edge_gizmo_material = null
 	paint_brush_gizmo_material = null
 	subdivide_outline_material = null
@@ -4613,6 +4587,9 @@ func _update_gizmos() -> void:
 	var half_size: Vector3 = b["half_size"]
 	brush_gizmo.mesh = _build_wire_box_mesh(center, half_size, red_gizmo_material)
 	brush_gizmo.visible = true
+	var active_face_material: Material = yellow_gizmo_material
+	if face_drag_active and face_drag_ctrl_mode:
+		active_face_material = purple_face_gizmo_material if purple_face_gizmo_material != null else yellow_gizmo_material
 
 	var face_idx := selected_face_index
 	var face_visible := face_idx >= 0
@@ -4624,13 +4601,13 @@ func _update_gizmos() -> void:
 			var brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
 			if brush != null:
 				var selected_vertices := _get_selected_vertices_world(brush)
-				face_gizmo.mesh = _build_polygon_wire_mesh(selected_vertices, yellow_gizmo_material)
+				face_gizmo.mesh = _build_polygon_wire_mesh(selected_vertices, active_face_material)
 				face_gizmo.visible = selected_vertices.size() >= 3
 			else:
-				face_gizmo.mesh = _build_face_wire_mesh(center, half_size, face_idx, yellow_gizmo_material)
+				face_gizmo.mesh = _build_face_wire_mesh(center, half_size, face_idx, active_face_material)
 				face_gizmo.visible = true
 		else:
-			face_gizmo.mesh = _build_face_wire_mesh(center, half_size, face_idx, yellow_gizmo_material)
+			face_gizmo.mesh = _build_face_wire_mesh(center, half_size, face_idx, active_face_material)
 			face_gizmo.visible = true
 	else:
 		face_gizmo.visible = false
