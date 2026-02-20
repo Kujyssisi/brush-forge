@@ -2,6 +2,13 @@
 extends EditorPlugin
 
 const BRUSH_MESH_BUILDER_SCRIPT = preload("res://addons/brush_forge_editor/mesh/brush_mesh_builder.gd")
+const GIZMO_MESH_BUILDER_SCRIPT = preload("res://addons/brush_forge_editor/editor/gizmo_mesh_builder.gd")
+const GIZMO_SHAPE_BUILDER_SCRIPT = preload("res://addons/brush_forge_editor/editor/gizmo_shape_builder.gd")
+const EDITOR_MATH_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_math_utils.gd")
+const EDITOR_BAKE_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_bake_utils.gd")
+const EDITOR_STATE_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_state_utils.gd")
+const EDITOR_UV_TEXTURE_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_uv_texture_utils.gd")
+const EDITOR_BRUSH_PICK_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_brush_pick_utils.gd")
 const BRUSH_FORGE_MAP_SCRIPT = preload("res://addons/brush_forge_editor/core/brush_forge_map.gd")
 const BRUSH_FORGE_MAP_ICON = preload("res://addons/brush_forge_editor/icons/BrushForgeMap_Node_Icon.svg")
 
@@ -24,6 +31,10 @@ var texture_menu: PopupMenu
 var texture_panel: PanelContainer
 var texture_list: ItemList
 var texture_title_label: Label
+var uv_card_panel: PanelContainer
+var paint_card_panel: PanelContainer
+var subdivide_card_panel: PanelContainer
+var materials_card_panel: PanelContainer
 var uv_section_toggle_button: Button
 var uv_section_container: VBoxContainer
 var uv_preview_mode_button: Button
@@ -177,6 +188,17 @@ var history_action_active := false
 var texture_material_paths: Array = []
 var texture_material_names: Array = []
 var texture_preview_cache: Dictionary = {}
+var texture_menu_refresh_in_progress := false
+var texture_menu_refresh_pending := false
+var selection_lock_refresh_queued := false
+var brush_meshes_cache: Array[MeshInstance3D] = []
+var brush_meshes_cache_owner_id := -1
+var brush_meshes_cache_child_count := -1
+var tool_ui_state_signature := ""
+var subdivide_face_cache_key := ""
+var subdivide_face_cache: Array[Vector3] = []
+var subdivide_controls_updating := false
+var pending_mesh_rebuild_indices := {}
 var uv_controls_updating := false
 var uv_preview_drag_active := false
 var uv_preview_rotate_drag := false
@@ -188,6 +210,7 @@ var uv_preview_vertex_mode := false
 var map_custom_type_registered := false
 
 func _build_brush_mesh(brush: BrushForge) -> ArrayMesh:
+	_sanitize_brush_face_data(brush)
 	if BRUSH_MESH_BUILDER_SCRIPT != null:
 		return BRUSH_MESH_BUILDER_SCRIPT.build_brush_mesh(brush)
 	return ArrayMesh.new()
@@ -336,11 +359,65 @@ func _enter_tree():
 	get_editor_interface().get_base_control().add_child(texture_menu)
 	texture_panel = PanelContainer.new()
 	texture_panel.name = "__BrushForgeTexturePanel"
-	texture_panel.custom_minimum_size = Vector2(320.0, 520.0)
+	texture_panel.custom_minimum_size = Vector2(0.0, 320.0)
+	texture_panel.size_flags_horizontal = Control.SIZE_FILL
+	texture_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var panel_style := StyleBoxFlat.new()
+	panel_style.bg_color = Color(0.11, 0.11, 0.12, 0.95)
+	panel_style.border_width_left = 1
+	panel_style.border_width_top = 1
+	panel_style.border_width_right = 1
+	panel_style.border_width_bottom = 1
+	panel_style.border_color = Color(0.22, 0.22, 0.24, 1.0)
+	panel_style.corner_radius_top_left = 8
+	panel_style.corner_radius_top_right = 8
+	panel_style.corner_radius_bottom_left = 8
+	panel_style.corner_radius_bottom_right = 8
+	texture_panel.add_theme_stylebox_override("panel", panel_style)
+	var texture_scroll := ScrollContainer.new()
+	texture_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	texture_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	texture_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	texture_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	texture_panel.add_child(texture_scroll)
+	var content_margin := MarginContainer.new()
+	content_margin.add_theme_constant_override("margin_left", 10)
+	content_margin.add_theme_constant_override("margin_top", 10)
+	content_margin.add_theme_constant_override("margin_right", 10)
+	content_margin.add_theme_constant_override("margin_bottom", 10)
+	content_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content_margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	texture_scroll.add_child(content_margin)
+	var texture_hbox := HBoxContainer.new()
+	texture_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	texture_hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	texture_hbox.add_theme_constant_override("separation", 12)
+	content_margin.add_child(texture_hbox)
+	var card_style := StyleBoxFlat.new()
+	card_style.bg_color = Color(0.16, 0.16, 0.18, 0.97)
+	card_style.border_width_left = 1
+	card_style.border_width_top = 1
+	card_style.border_width_right = 1
+	card_style.border_width_bottom = 1
+	card_style.border_color = Color(0.28, 0.28, 0.31, 1.0)
+	card_style.corner_radius_top_left = 6
+	card_style.corner_radius_top_right = 6
+	card_style.corner_radius_bottom_left = 6
+	card_style.corner_radius_bottom_right = 6
+	uv_card_panel = PanelContainer.new()
+	uv_card_panel.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	uv_card_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	uv_card_panel.add_theme_stylebox_override("panel", card_style)
+	texture_hbox.add_child(uv_card_panel)
 	var texture_vbox := VBoxContainer.new()
-	texture_panel.add_child(texture_vbox)
+	texture_vbox.custom_minimum_size = Vector2(360.0, 0.0)
+	texture_vbox.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	texture_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	texture_vbox.add_theme_constant_override("separation", 6)
+	uv_card_panel.add_child(texture_vbox)
 	texture_title_label = Label.new()
 	texture_title_label.text = "BrushForge Materials"
+	texture_title_label.add_theme_color_override("font_color", Color(0.95, 0.95, 0.98, 1.0))
 	texture_vbox.add_child(texture_title_label)
 
 	uv_section_toggle_button = Button.new()
@@ -357,7 +434,8 @@ func _enter_tree():
 	uv_title.text = "UV Controls"
 	uv_section_container.add_child(uv_title)
 
-	var uv_tools_row := HBoxContainer.new()
+	var uv_tools_row := GridContainer.new()
+	uv_tools_row.columns = 2
 	uv_section_container.add_child(uv_tools_row)
 
 	mesh_preview_mode_button = Button.new()
@@ -466,17 +544,28 @@ func _enter_tree():
 	uv_preview_rect.gui_input.connect(_on_uv_preview_gui_input, CONNECT_DEFERRED)
 	uv_section_container.add_child(uv_preview_rect)
 
+	paint_card_panel = PanelContainer.new()
+	paint_card_panel.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	paint_card_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	paint_card_panel.add_theme_stylebox_override("panel", card_style)
+	texture_hbox.add_child(paint_card_panel)
+	var paint_column := VBoxContainer.new()
+	paint_column.custom_minimum_size = Vector2(240.0, 0.0)
+	paint_column.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	paint_column.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	paint_column.add_theme_constant_override("separation", 6)
+	paint_card_panel.add_child(paint_column)
 	paint_section_label = Label.new()
 	paint_section_label.text = "Paint"
-	texture_vbox.add_child(paint_section_label)
+	paint_column.add_child(paint_section_label)
 	paint_color_picker = ColorPickerButton.new()
 	paint_color_picker.custom_minimum_size = Vector2(0.0, 28.0)
 	paint_color_picker.color = Color(1, 1, 1, 1)
 	paint_color_picker.color_changed.connect(_on_paint_color_changed, CONNECT_DEFERRED)
-	texture_vbox.add_child(paint_color_picker)
+	paint_column.add_child(paint_color_picker)
 	paint_preset_row = HBoxContainer.new()
 	paint_preset_row.add_theme_constant_override("separation", 4)
-	texture_vbox.add_child(paint_preset_row)
+	paint_column.add_child(paint_preset_row)
 	var paint_presets := [
 		{"name": "Black", "color": Color(0, 0, 0, 1)},
 		{"name": "Red", "color": Color(1, 0, 0, 1)},
@@ -514,13 +603,13 @@ func _enter_tree():
 	paint_apply_mode_option.add_item("Paint: Brush", PAINT_APPLY_BRUSH)
 	paint_apply_mode_option.add_item("Paint: Bucket", PAINT_APPLY_BUCKET)
 	paint_apply_mode_option.select(0)
-	texture_vbox.add_child(paint_apply_mode_option)
+	paint_column.add_child(paint_apply_mode_option)
 	paint_vertex_preview_button = Button.new()
 	paint_vertex_preview_button.toggle_mode = true
 	paint_vertex_preview_button.button_pressed = BRUSH_MESH_BUILDER_SCRIPT.use_vertex_color_preview
 	paint_vertex_preview_button.text = "Disable Materials (Show Vertex)"
 	paint_vertex_preview_button.toggled.connect(_on_paint_vertex_preview_toggled, CONNECT_DEFERRED)
-	texture_vbox.add_child(paint_vertex_preview_button)
+	paint_column.add_child(paint_vertex_preview_button)
 	paint_blend_mode_option = OptionButton.new()
 	paint_blend_mode_option.custom_minimum_size = Vector2(0.0, 28.0)
 	paint_blend_mode_option.add_item("Blend: Normal", PAINT_MODE_NORMAL)
@@ -529,31 +618,42 @@ func _enter_tree():
 	paint_blend_mode_option.add_item("Blend: Subtract", PAINT_MODE_SUBTRACT)
 	paint_blend_mode_option.add_item("Blend: Burn", PAINT_MODE_BURN)
 	paint_blend_mode_option.select(0)
-	texture_vbox.add_child(paint_blend_mode_option)
+	paint_column.add_child(paint_blend_mode_option)
 	paint_radius_spinbox = SpinBox.new()
 	paint_radius_spinbox.min_value = 0.05
 	paint_radius_spinbox.max_value = 64.0
 	paint_radius_spinbox.step = 0.05
 	paint_radius_spinbox.value = 0.25
 	paint_radius_spinbox.prefix = "Range "
-	texture_vbox.add_child(paint_radius_spinbox)
+	paint_column.add_child(paint_radius_spinbox)
 	paint_strength_spinbox = SpinBox.new()
 	paint_strength_spinbox.min_value = 0.01
 	paint_strength_spinbox.max_value = 1.0
 	paint_strength_spinbox.step = 0.01
 	paint_strength_spinbox.value = 0.35
 	paint_strength_spinbox.prefix = "Strength "
-	texture_vbox.add_child(paint_strength_spinbox)
+	paint_column.add_child(paint_strength_spinbox)
 
+	subdivide_card_panel = PanelContainer.new()
+	subdivide_card_panel.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	subdivide_card_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	subdivide_card_panel.add_theme_stylebox_override("panel", card_style)
+	texture_hbox.add_child(subdivide_card_panel)
+	var subdivide_column := VBoxContainer.new()
+	subdivide_column.custom_minimum_size = Vector2(210.0, 0.0)
+	subdivide_column.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	subdivide_column.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	subdivide_column.add_theme_constant_override("separation", 6)
+	subdivide_card_panel.add_child(subdivide_column)
 	subdivide_section_label = Label.new()
 	subdivide_section_label.text = "Subdivision"
-	texture_vbox.add_child(subdivide_section_label)
+	subdivide_column.add_child(subdivide_section_label)
 	subdivide_lock_xy_button = Button.new()
 	subdivide_lock_xy_button.toggle_mode = true
 	subdivide_lock_xy_button.button_pressed = true
 	subdivide_lock_xy_button.text = "Lock X/Y"
 	subdivide_lock_xy_button.toggled.connect(_on_subdivide_lock_xy_toggled, CONNECT_DEFERRED)
-	texture_vbox.add_child(subdivide_lock_xy_button)
+	subdivide_column.add_child(subdivide_lock_xy_button)
 	subdivide_x_spinbox = SpinBox.new()
 	subdivide_x_spinbox.min_value = 1
 	subdivide_x_spinbox.max_value = 10
@@ -561,7 +661,7 @@ func _enter_tree():
 	subdivide_x_spinbox.value = 1
 	subdivide_x_spinbox.prefix = "Subdiv X "
 	subdivide_x_spinbox.value_changed.connect(_on_subdivide_x_changed, CONNECT_DEFERRED)
-	texture_vbox.add_child(subdivide_x_spinbox)
+	subdivide_column.add_child(subdivide_x_spinbox)
 	subdivide_y_spinbox = SpinBox.new()
 	subdivide_y_spinbox.min_value = 1
 	subdivide_y_spinbox.max_value = 10
@@ -569,19 +669,34 @@ func _enter_tree():
 	subdivide_y_spinbox.value = 1
 	subdivide_y_spinbox.prefix = "Subdiv Y "
 	subdivide_y_spinbox.value_changed.connect(_on_subdivide_y_changed, CONNECT_DEFERRED)
-	texture_vbox.add_child(subdivide_y_spinbox)
+	subdivide_column.add_child(subdivide_y_spinbox)
 
+	materials_card_panel = PanelContainer.new()
+	materials_card_panel.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	materials_card_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	materials_card_panel.add_theme_stylebox_override("panel", card_style)
+	texture_hbox.add_child(materials_card_panel)
+	var materials_column := VBoxContainer.new()
+	materials_column.custom_minimum_size = Vector2(300.0, 0.0)
+	materials_column.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	materials_column.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	materials_column.add_theme_constant_override("separation", 6)
+	materials_card_panel.add_child(materials_column)
+	var materials_title := Label.new()
+	materials_title.text = "Materials"
+	materials_title.add_theme_color_override("font_color", Color(0.95, 0.95, 0.98, 1.0))
+	materials_column.add_child(materials_title)
 	texture_list = ItemList.new()
 	texture_list.select_mode = ItemList.SELECT_SINGLE
 	texture_list.fixed_column_width = 240
 	texture_list.max_columns = 1
 	texture_list.same_column_width = true
+	texture_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	texture_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	texture_list.custom_minimum_size = Vector2(0.0, 220.0)
+	texture_list.custom_minimum_size = Vector2(280.0, 220.0)
 	texture_list.item_selected.connect(_on_texture_list_item_selected, CONNECT_DEFERRED)
-	texture_vbox.add_child(texture_list)
-	add_control_to_bottom_panel(texture_panel, "BrushForge Materials")
-	texture_panel_in_bottom = true
+	materials_column.add_child(texture_list)
+	texture_panel_in_bottom = false
 	_set_plugin_active(false)
 
 func _exit_tree():
@@ -651,6 +766,10 @@ func _exit_tree():
 			remove_control_from_bottom_panel(texture_panel)
 		_queue_free_control(texture_panel)
 		texture_panel = null
+	uv_card_panel = null
+	paint_card_panel = null
+	subdivide_card_panel = null
+	materials_card_panel = null
 	_clear_selection()
 	_remove_gizmo_nodes()
 	if map_custom_type_registered:
@@ -675,6 +794,10 @@ func _block_ui_control_signals() -> void:
 		grid_size_spinbox,
 		texture_menu,
 		texture_panel,
+		uv_card_panel,
+		paint_card_panel,
+		subdivide_card_panel,
+		materials_card_panel,
 		texture_list,
 		paint_preset_row,
 		uv_section_toggle_button,
@@ -734,6 +857,7 @@ func _on_add_brush():
 		_end_history_action()
 	_begin_history_action()
 	map_node.add_brush(new_b, mi)
+	_invalidate_brush_mesh_cache()
 	_select_brush(mi, map_node.brush_data.size() - 1)
 	var selection := get_editor_interface().get_selection()
 	if selection != null:
@@ -750,6 +874,7 @@ func _on_add_brush():
 		fmi.position = fb.position
 		fmi.set_meta(EDIT_LOCK_META, true)
 		map_node.add_brush(fb, fmi)
+		_invalidate_brush_mesh_cache()
 		_select_brush(fmi, map_node.brush_data.size() - 1)
 		map_node.sync_data_from_scene()
 
@@ -777,8 +902,19 @@ func _on_bake_mesh_collision_pressed() -> void:
 		var brush: BrushForge = map_node.brush_data[i] as BrushForge
 		if brush == null:
 			continue
-		_collect_brush_bake_geometry(brush, mesh_groups, collision_faces)
-	var baked_mesh := _build_baked_mesh_from_groups(mesh_groups)
+		var render_mesh := _build_brush_mesh(brush)
+		var collision_brush := EDITOR_BAKE_UTILS_SCRIPT.clone_brush_with_no_subdivisions(brush)
+		var collision_mesh := _build_brush_mesh(collision_brush)
+		EDITOR_BAKE_UTILS_SCRIPT.collect_bake_geometry_from_meshes(
+			brush.position,
+			render_mesh,
+			collision_mesh,
+			mesh_groups,
+			collision_faces,
+			SKIP_MATERIAL_PATH,
+			CLIP_MATERIAL_PATH
+		)
+	var baked_mesh := EDITOR_BAKE_UTILS_SCRIPT.build_baked_mesh_from_groups(mesh_groups)
 	if baked_mesh != null and baked_mesh.get_surface_count() > 0:
 		baked_mesh.lightmap_unwrap(Transform3D.IDENTITY, BAKE_UV2_TEXEL_SIZE)
 		var mesh_instance := MeshInstance3D.new()
@@ -811,136 +947,6 @@ func _resolve_scene_owner(fallback_parent: Node) -> Node:
 	if map_node != null and map_node.owner != null:
 		return map_node.owner
 	return fallback_parent
-
-func _collect_brush_bake_geometry(brush: BrushForge, mesh_groups: Dictionary, collision_faces: PackedVector3Array) -> void:
-	if brush == null:
-		return
-	var render_mesh := _build_brush_mesh(brush)
-	if render_mesh == null:
-		return
-	var collision_brush := _clone_brush_with_no_subdivisions(brush)
-	var collision_mesh := _build_brush_mesh(collision_brush)
-	for surface_index in range(render_mesh.get_surface_count()):
-		var arrays := render_mesh.surface_get_arrays(surface_index)
-		if arrays.is_empty():
-			continue
-		var src_verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-		if src_verts.size() < 3:
-			continue
-		var src_material := render_mesh.surface_get_material(surface_index)
-		var mode := _surface_bake_mode(src_material)
-		if mode == "skip":
-			continue
-		if collision_mesh != null and surface_index < collision_mesh.get_surface_count():
-			var collision_arrays := collision_mesh.surface_get_arrays(surface_index)
-			if not collision_arrays.is_empty():
-				var collision_verts: PackedVector3Array = collision_arrays[Mesh.ARRAY_VERTEX]
-				if collision_verts.size() >= 3:
-					var translated_collision := PackedVector3Array()
-					translated_collision.resize(collision_verts.size())
-					for ci in range(collision_verts.size()):
-						translated_collision[ci] = collision_verts[ci] + brush.position
-					collision_faces.append_array(translated_collision)
-		if mode != "solid":
-			continue
-		var translated_verts := PackedVector3Array()
-		translated_verts.resize(src_verts.size())
-		for i in range(src_verts.size()):
-			translated_verts[i] = src_verts[i] + brush.position
-		var group_key := _mesh_group_key_for_material(src_material)
-		var group: Dictionary = mesh_groups.get(group_key, {})
-		if group.is_empty():
-			group = {
-				"material": src_material,
-				"verts": PackedVector3Array(),
-				"normals": PackedVector3Array(),
-				"uvs": PackedVector2Array(),
-				"colors": PackedColorArray(),
-			}
-		var group_verts: PackedVector3Array = group["verts"]
-		group_verts.append_array(translated_verts)
-		group["verts"] = group_verts
-		var src_normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
-		if src_normals.size() == src_verts.size():
-			var group_normals: PackedVector3Array = group["normals"]
-			group_normals.append_array(src_normals)
-			group["normals"] = group_normals
-		var src_uvs: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV]
-		if src_uvs.size() == src_verts.size():
-			var group_uvs: PackedVector2Array = group["uvs"]
-			group_uvs.append_array(src_uvs)
-			group["uvs"] = group_uvs
-		var src_colors: PackedColorArray = arrays[Mesh.ARRAY_COLOR]
-		if src_colors.size() == src_verts.size():
-			var group_colors: PackedColorArray = group["colors"]
-			group_colors.append_array(src_colors)
-			group["colors"] = group_colors
-		mesh_groups[group_key] = group
-
-func _mesh_group_key_for_material(material: Material) -> String:
-	if material == null:
-		return "__null_material__"
-	var path := material.resource_path
-	if path != "":
-		return "path:" + path.to_lower()
-	return "obj:%d" % material.get_instance_id()
-
-func _build_baked_mesh_from_groups(mesh_groups: Dictionary) -> ArrayMesh:
-	if mesh_groups.is_empty():
-		return ArrayMesh.new()
-	var keys := mesh_groups.keys()
-	keys.sort()
-	var out_mesh := ArrayMesh.new()
-	for key in keys:
-		var group: Dictionary = mesh_groups.get(key, {})
-		if group.is_empty():
-			continue
-		var verts: PackedVector3Array = group.get("verts", PackedVector3Array())
-		if verts.size() < 3:
-			continue
-		var arr := []
-		arr.resize(Mesh.ARRAY_MAX)
-		arr[Mesh.ARRAY_VERTEX] = verts
-		var normals: PackedVector3Array = group.get("normals", PackedVector3Array())
-		if normals.size() == verts.size():
-			arr[Mesh.ARRAY_NORMAL] = normals
-		var uvs: PackedVector2Array = group.get("uvs", PackedVector2Array())
-		if uvs.size() == verts.size():
-			arr[Mesh.ARRAY_TEX_UV] = uvs
-		var colors: PackedColorArray = group.get("colors", PackedColorArray())
-		if colors.size() == verts.size():
-			arr[Mesh.ARRAY_COLOR] = colors
-		out_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-		var surf_idx := out_mesh.get_surface_count() - 1
-		var material: Material = group.get("material", null)
-		if material != null:
-			out_mesh.surface_set_material(surf_idx, material)
-	return out_mesh
-
-func _clone_brush_with_no_subdivisions(src: BrushForge) -> BrushForge:
-	var copy := BrushForge.create_box(src.position, src.size)
-	copy.planes.clear()
-	for pp in src.planes:
-		var p: NeoPlane = pp as NeoPlane
-		if p != null:
-			copy.planes.append(NeoPlane.new(p.normal, p.distance))
-	copy.face_material_paths = src.face_material_paths.duplicate(true)
-	copy.face_uv_transforms = src.face_uv_transforms.duplicate(true)
-	copy.face_paint_colors = src.face_paint_colors.duplicate(true)
-	copy.face_paint_strokes = src.face_paint_strokes.duplicate(true)
-	copy.face_subdivisions = {}
-	copy.lock_uvs = src.lock_uvs
-	return copy
-
-func _surface_bake_mode(material: Material) -> String:
-	if material == null:
-		return "solid"
-	var mat_path := material.resource_path.to_lower()
-	if mat_path == SKIP_MATERIAL_PATH.to_lower():
-		return "skip"
-	if mat_path == CLIP_MATERIAL_PATH.to_lower():
-		return "clip"
-	return "solid"
 
 func _on_move_brush_toggled(enabled: bool) -> void:
 	if not plugin_active and enabled:
@@ -1202,6 +1208,7 @@ func _on_subdivide_tool_toggled(enabled: bool) -> void:
 			paint_tool_button.button_pressed = false
 		if texture_tool_button != null and texture_tool_button.button_pressed:
 			texture_tool_button.button_pressed = false
+		_sync_subdivide_lock_mode_for_selected_face()
 	_update_gizmos()
 
 func _on_texture_tool_toggled(enabled: bool) -> void:
@@ -1257,7 +1264,7 @@ func _on_lock_uvs_toggled(enabled: bool) -> void:
 	if brush == null:
 		return
 	if brush.lock_uvs != enabled:
-		_adjust_brush_uv_offsets_for_lock_toggle(brush, enabled)
+		EDITOR_UV_TEXTURE_UTILS_SCRIPT.adjust_brush_uv_offsets_for_lock_toggle(brush, enabled)
 	brush.lock_uvs = enabled
 	_refresh_lock_uv_button_text()
 	var meshes := _get_brush_meshes()
@@ -1352,7 +1359,7 @@ func _paint_from_pick(camera: Camera3D, pick: Dictionary, mouse_pos: Vector2) ->
 	var target_mesh := meshes[target_index]
 	if target_mesh == null:
 		return
-	var precise_hit := _pick_exact_face_on_brush(target_index, camera, mouse_pos)
+	var precise_hit := EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, target_index, camera, mouse_pos)
 	var hit: Vector3 = _get_pick_hit_point_from_mouse(camera, pick, mouse_pos)
 	if not precise_hit.is_empty():
 		target_face = int(precise_hit.get("face_index", target_face))
@@ -1364,7 +1371,6 @@ func _paint_from_pick(camera: Camera3D, pick: Dictionary, mouse_pos: Vector2) ->
 	var radius := float(paint_radius_spinbox.value) if paint_radius_spinbox != null else 1.0
 	var strength := float(paint_strength_spinbox.value) if paint_strength_spinbox != null else 0.35
 	var col := paint_color_picker.color if paint_color_picker != null else Color.WHITE
-	# Interpolate stamps along drag distance so strokes stay continuous like a brush.
 	var min_step: float = maxf(radius * 0.2, 0.005)
 	if paint_last_stamp == INVALID_STAMP_POINT:
 		_paint_at_world_point(target_index, target_face, hit, col, radius, strength, false)
@@ -1384,54 +1390,6 @@ func _paint_from_pick(camera: Camera3D, pick: Dictionary, mouse_pos: Vector2) ->
 		_paint_at_world_point(target_index, target_face, stamp_point, col, radius, strength, false)
 	paint_last_stamp = hit
 	_rebuild_painted_brush_mesh(target_index)
-
-func _pick_exact_face_on_brush(brush_index: int, camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
-	if map_node == null:
-		return {}
-	if brush_index < 0 or brush_index >= map_node.brush_data.size():
-		return {}
-	var brush: BrushForge = map_node.brush_data[brush_index] as BrushForge
-	if brush == null:
-		return {}
-	var origin: Vector3 = camera.project_ray_origin(mouse_pos)
-	var dir: Vector3 = camera.project_ray_normal(mouse_pos).normalized()
-	var best_t: float = INF
-	var best_face_index: int = -1
-	var best_hit: Vector3 = Vector3.ZERO
-	var planes: Array = brush.planes
-	for i in range(planes.size()):
-		var plane: NeoPlane = planes[i] as NeoPlane
-		if plane == null:
-			continue
-		var denom: float = plane.normal.dot(dir)
-		if absf(denom) < 0.00001:
-			continue
-		var t: float = (plane.distance - plane.normal.dot(origin)) / denom
-		if t < 0.0:
-			continue
-		var hit: Vector3 = origin + dir * t
-		if not _point_inside_brush_planes(hit, planes, 0.005):
-			continue
-		if t < best_t:
-			best_t = t
-			best_face_index = i
-			best_hit = hit
-	if best_face_index < 0:
-		return {}
-	return {
-		"face_index": best_face_index,
-		"hit": best_hit,
-		"t": best_t,
-	}
-
-func _point_inside_brush_planes(point: Vector3, planes: Array, eps: float) -> bool:
-	for p in planes:
-		var plane: NeoPlane = p as NeoPlane
-		if plane == null:
-			continue
-		if plane.normal.dot(point) > plane.distance + eps:
-			return false
-	return true
 
 func _rebuild_painted_brush_mesh(brush_index: int) -> void:
 	var meshes := _get_brush_meshes()
@@ -1463,7 +1421,6 @@ func _paint_at_world_point(brush_index: int, face_index: int, hit: Vector3, colo
 		"strength": clampf(strength, 0.0, 1.0),
 		"mode": int(paint_blend_mode_option.get_selected_id()) if paint_blend_mode_option != null else PAINT_MODE_NORMAL,
 	})
-	# Keep only recent strokes for performance and responsiveness.
 	if strokes.size() > 8192:
 		strokes = strokes.slice(strokes.size() - 8192, strokes.size())
 	brush.face_paint_strokes[face_key] = strokes
@@ -1493,6 +1450,8 @@ func _write_face_subdivision_xy(brush: BrushForge, face_index: int, sx: int, sy:
 	}
 
 func _apply_subdivide_xy_from_ui(axis: int, value: float) -> void:
+	if subdivide_controls_updating:
+		return
 	if subdivide_tool_button == null or not subdivide_tool_button.button_pressed:
 		return
 	if map_node == null or selected_brush_index < 0 or selected_face_index < 0:
@@ -1506,6 +1465,8 @@ func _apply_subdivide_xy_from_ui(axis: int, value: float) -> void:
 	var xy := _read_face_subdivision_xy(brush, selected_face_index)
 	var sx := int(xy.get("x", 1))
 	var sy := int(xy.get("y", 1))
+	var prev_sx := sx
+	var prev_sy := sy
 	if axis == 0:
 		sx = amount
 		if subdivide_lock_xy_button != null and subdivide_lock_xy_button.button_pressed:
@@ -1518,6 +1479,8 @@ func _apply_subdivide_xy_from_ui(axis: int, value: float) -> void:
 		subdivide_x_spinbox.value = sx
 	if subdivide_y_spinbox != null and absf(subdivide_y_spinbox.value - sy) > 0.00001:
 		subdivide_y_spinbox.value = sy
+	if sx == prev_sx and sy == prev_sy:
+		return
 	_begin_history_action()
 	_write_face_subdivision_xy(brush, selected_face_index, sx, sy)
 	var meshes := _get_brush_meshes()
@@ -1527,6 +1490,22 @@ func _apply_subdivide_xy_from_ui(axis: int, value: float) -> void:
 			mesh.mesh = _build_brush_mesh(brush)
 	_end_history_action()
 	_update_gizmos()
+
+func _sync_subdivide_lock_mode_for_selected_face() -> void:
+	if subdivide_tool_button == null or not subdivide_tool_button.button_pressed:
+		return
+	if subdivide_lock_xy_button == null or not subdivide_lock_xy_button.button_pressed:
+		return
+	if map_node == null or selected_brush_index < 0 or selected_face_index < 0 or selected_brush_index >= map_node.brush_data.size():
+		return
+	var brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
+	if brush == null:
+		return
+	var xy := _read_face_subdivision_xy(brush, selected_face_index)
+	var sx := int(xy.get("x", 1))
+	var sy := int(xy.get("y", 1))
+	if sx != sy:
+		subdivide_lock_xy_button.button_pressed = false
 
 func _on_subdivide_x_changed(value: float) -> void:
 	_apply_subdivide_xy_from_ui(0, value)
@@ -1651,43 +1630,8 @@ func _refresh_uv_controls_from_selection() -> void:
 func _refresh_uv_preview(face_uv: Dictionary) -> void:
 	if uv_preview_rect == null:
 		return
-	var preview_tex := _build_uv_preview_texture(face_uv)
+	var preview_tex := EDITOR_UV_TEXTURE_UTILS_SCRIPT.build_uv_preview_texture(face_uv, uv_preview_zoom, uv_preview_vertex_mode)
 	uv_preview_rect.texture = preview_tex
-
-func _build_uv_preview_texture(face_uv: Dictionary) -> Texture2D:
-	var w := 192
-	var h := 128
-	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
-	var scale: Vector2 = face_uv.get("scale", Vector2.ONE)
-	var offset: Vector2 = face_uv.get("offset", Vector2.ZERO)
-	var rotation: float = float(face_uv.get("rotation", 0.0))
-	var sx := scale.x if absf(scale.x) > 0.00001 else 1.0
-	var sy := scale.y if absf(scale.y) > 0.00001 else 1.0
-	var tiles := 8.0 / maxf(uv_preview_zoom, 0.0001)
-	for y in range(h):
-		for x in range(w):
-			var uv := Vector2(float(x) / float(w), float(y) / float(h))
-			var p := (uv - Vector2(0.5, 0.5)) * tiles
-			var q := p.rotated(-rotation)
-			q = Vector2(q.x * sx, q.y * sy) + offset
-			var cx := int(floor(q.x))
-			var cy := int(floor(q.y))
-			var is_dark := ((cx + cy) & 1) == 0
-			var fx: float = q.x - floor(q.x)
-			var fy: float = q.y - floor(q.y)
-			var c := Color(0.20, 0.20, 0.20, 1.0) if is_dark else Color(0.32, 0.32, 0.32, 1.0)
-			if uv_preview_vertex_mode:
-				c = Color(fx, fy, 1.0 - fx, 1.0)
-			elif absf(fx - 0.5) < 0.03 or absf(fy - 0.5) < 0.03:
-				c = Color(0.60, 0.60, 0.60, 1.0)
-			img.set_pixel(x, y, c)
-	var mid_y := int(h / 2)
-	var mid_x := int(w / 2)
-	for x_axis in range(w):
-		img.set_pixel(x_axis, mid_y, Color(1.0, 0.2, 0.2, 1.0))
-	for y_axis in range(h):
-		img.set_pixel(mid_x, y_axis, Color(0.2, 0.8, 1.0, 1.0))
-	return ImageTexture.create_from_image(img)
 
 func _on_uv_preview_gui_input(event: InputEvent) -> void:
 	if not (event is InputEventMouseButton or event is InputEventMouseMotion):
@@ -1738,6 +1682,18 @@ func _on_uv_preview_gui_input(event: InputEvent) -> void:
 		_apply_uv_controls_to_selected_face()
 
 func _refresh_texture_menu() -> void:
+	if texture_menu_refresh_in_progress:
+		texture_menu_refresh_pending = true
+		return
+	texture_menu_refresh_in_progress = true
+	texture_menu_refresh_pending = false
+	_refresh_texture_menu_impl()
+	texture_menu_refresh_in_progress = false
+	if texture_menu_refresh_pending:
+		texture_menu_refresh_pending = false
+		call_deferred("_refresh_texture_menu")
+
+func _refresh_texture_menu_impl() -> void:
 	texture_material_paths.clear()
 	texture_material_names.clear()
 	if texture_menu != null:
@@ -1749,7 +1705,7 @@ func _refresh_texture_menu() -> void:
 	var folder := map_node.material_folder_path.strip_edges()
 	if folder == "":
 		folder = "res://Mats"
-	var material_paths := _collect_material_paths_recursive(folder)
+	var material_paths := EDITOR_UV_TEXTURE_UTILS_SCRIPT.collect_material_paths_recursive(folder)
 	var utility_materials := [CLIP_MATERIAL_PATH, SKIP_MATERIAL_PATH]
 	for p in utility_materials:
 		if ResourceLoader.exists(p) and material_paths.find(p) < 0:
@@ -1763,7 +1719,12 @@ func _refresh_texture_menu() -> void:
 		texture_material_paths.append(path)
 		texture_material_names.append(display_name)
 		texture_menu.add_item(display_name, texture_material_paths.size() - 1)
-		var preview := _get_material_preview_texture(path, mat as Material)
+		var preview := EDITOR_UV_TEXTURE_UTILS_SCRIPT.get_material_preview_texture(
+			path,
+			mat as Material,
+			texture_preview_cache,
+			get_editor_interface()
+		)
 		if texture_list != null:
 			texture_list.add_item(display_name, preview, true)
 			texture_list.set_item_metadata(texture_list.get_item_count() - 1, path)
@@ -1771,37 +1732,10 @@ func _refresh_texture_menu() -> void:
 		texture_list.add_item("No .tres/.res materials found", null, false)
 	_sync_texture_list_selection()
 
-func _collect_material_paths_recursive(root_folder: String) -> Array[String]:
-	var out: Array[String] = []
-	var stack: Array[String] = [root_folder]
-	while not stack.is_empty():
-		var current: String = str(stack.pop_back())
-		var dir := DirAccess.open(current)
-		if dir == null:
-			continue
-		dir.list_dir_begin()
-		while true:
-			var name := dir.get_next()
-			if name == "":
-				break
-			if name == "." or name == "..":
-				continue
-			var path: String = current.path_join(name)
-			if dir.current_is_dir():
-				stack.append(path)
-				continue
-			var lower := name.to_lower()
-			if lower.ends_with(".tres") or lower.ends_with(".res"):
-				out.append(path)
-		dir.list_dir_end()
-	out.sort()
-	return out
-
 func _on_texture_menu_id_pressed(id: int) -> void:
 	if id < 0 or id >= texture_material_paths.size():
 		return
-	var material_path: String = str(texture_material_paths[id])
-	_apply_texture_material_path(material_path)
+	_apply_texture_material_path(str(texture_material_paths[id]))
 
 func _on_texture_list_item_selected(index: int) -> void:
 	if texture_list == null:
@@ -1811,11 +1745,10 @@ func _on_texture_list_item_selected(index: int) -> void:
 	var metadata = texture_list.get_item_metadata(index)
 	if metadata == null:
 		return
-	var material_path: String = str(metadata)
-	_apply_texture_material_path(material_path)
+	_apply_texture_material_path(str(metadata))
 
 func _apply_texture_material_path(material_path: String) -> void:
-	if selected_brush_index < 0 or selected_face_index < 0:
+	if selected_brush_index < 0 or selected_face_index < 0 or map_node == null:
 		return
 	if selected_brush_index >= map_node.brush_data.size():
 		return
@@ -1836,27 +1769,6 @@ func _apply_texture_material_path(material_path: String) -> void:
 	_sync_texture_list_selection()
 	_refresh_uv_controls_from_selection()
 	_update_gizmos()
-
-func _get_material_preview_texture(material_path: String, mat: Material) -> Texture2D:
-	if texture_preview_cache.has(material_path):
-		var cached = texture_preview_cache[material_path]
-		if cached is Texture2D:
-			return cached as Texture2D
-	var fallback: Texture2D = get_editor_interface().get_base_control().get_theme_icon("Material", "EditorIcons")
-	var preview := fallback
-	var editor := get_editor_interface()
-	if editor != null and editor.has_method("make_mesh_previews"):
-		var plane := PlaneMesh.new()
-		plane.size = Vector2(1.0, 1.0)
-		plane.material = mat
-		var meshes: Array = [plane]
-		var previews = editor.call("make_mesh_previews", meshes, 64)
-		if previews is Array and previews.size() > 0:
-			var tex = previews[0]
-			if tex is Texture2D:
-				preview = tex as Texture2D
-	texture_preview_cache[material_path] = preview
-	return preview
 
 func _sync_texture_list_selection() -> void:
 	if texture_list == null:
@@ -1891,82 +1803,26 @@ func _sync_texture_list_selection() -> void:
 	texture_list.deselect_all()
 	_refresh_uv_controls_from_selection()
 
-func _adjust_brush_uv_offsets_for_lock_toggle(brush: BrushForge, enabling_lock: bool) -> void:
-	if brush == null:
-		return
-	var keys := {}
-	for k in brush.face_uv_transforms.keys():
-		keys[k] = true
-	for k in brush.face_material_paths.keys():
-		keys[k] = true
-	for i in range(6):
-		keys[str(i)] = true
-	for key in keys.keys():
-		var face_index := int(str(key))
-		if face_index < 0 or face_index > 5:
-			continue
-		var uv_basis := _uv_basis_from_face_index(face_index)
-		var u_axis: Vector3 = uv_basis["u"]
-		var v_axis: Vector3 = uv_basis["v"]
-		var shift := Vector2(brush.position.dot(u_axis), brush.position.dot(v_axis))
-		var existing = brush.face_uv_transforms.get(str(face_index), {})
-		var face_uv: Dictionary = {}
-		if existing is Dictionary:
-			face_uv = (existing as Dictionary).duplicate(true)
-		var scale: Vector2 = face_uv.get("scale", Vector2.ONE)
-		var rotation: float = float(face_uv.get("rotation", 0.0))
-		var offset: Vector2 = face_uv.get("offset", Vector2.ZERO)
-		var sx := scale.x if absf(scale.x) > 0.00001 else 1.0
-		var sy := scale.y if absf(scale.y) > 0.00001 else 1.0
-		var rotated_shift := shift.rotated(rotation)
-		var transformed_shift := Vector2(rotated_shift.x / sx, rotated_shift.y / sy)
-		if enabling_lock:
-			offset += transformed_shift
-		else:
-			offset -= transformed_shift
-		face_uv["offset"] = offset
-		face_uv["scale"] = scale
-		face_uv["rotation"] = rotation
-		brush.face_uv_transforms[str(face_index)] = face_uv
-
-func _uv_basis_from_face_index(face_index: int) -> Dictionary:
-	var normal := Vector3.UP
-	match face_index:
-		0:
-			normal = Vector3.RIGHT
-		1:
-			normal = Vector3.LEFT
-		2:
-			normal = Vector3.UP
-		3:
-			normal = Vector3.DOWN
-		4:
-			normal = Vector3.BACK
-		5:
-			normal = Vector3.FORWARD
-	var tangent := Vector3.RIGHT
-	if absf(normal.dot(tangent)) > 0.95:
-		tangent = Vector3.UP
-	tangent = (tangent - normal * tangent.dot(normal)).normalized()
-	var bitangent := normal.cross(tangent).normalized()
-	return {"u": tangent, "v": bitangent}
-
 func _handles(object: Object) -> bool:
-	return true
+	if object is BrushForgeMap:
+		return true
+	if object is MeshInstance3D:
+		var mesh := object as MeshInstance3D
+		return mesh.get_parent() is BrushForgeMap
+	return false
 
 func _edit(object: Object) -> void:
 	if object is BrushForgeMap:
 		map_node = object as BrushForgeMap
+		_invalidate_brush_mesh_cache()
 		_set_plugin_active(true)
-		_refresh_texture_menu()
-		_sync_texture_list_selection()
 		return
 	if object is MeshInstance3D:
 		var mesh := object as MeshInstance3D
 		if mesh.get_parent() is BrushForgeMap:
 			map_node = mesh.get_parent() as BrushForgeMap
+			_invalidate_brush_mesh_cache()
 			_set_plugin_active(true)
-			_refresh_texture_menu()
 			var idx := _get_brush_meshes().find(mesh)
 			if idx >= 0 and idx < map_node.brush_data.size() and _is_custom_tool_enabled():
 				_select_brush(mesh, idx)
@@ -1976,8 +1832,7 @@ func _edit(object: Object) -> void:
 
 func _process(_delta: float) -> void:
 	var selection_active := _selection_targets_map()
-	var custom_tool_active := _is_custom_tool_enabled()
-	var should_be_active := selection_active or (custom_tool_active and map_node != null)
+	var should_be_active := selection_active
 	if should_be_active != plugin_active:
 		_set_plugin_active(should_be_active)
 	if not plugin_active:
@@ -1985,7 +1840,6 @@ func _process(_delta: float) -> void:
 	if not _ensure_map_node(false):
 		_set_plugin_active(false)
 		return
-	_lock_all_brush_nodes()
 	_sync_selection_refs()
 	if _is_custom_tool_enabled():
 		_lock_editor_selection()
@@ -1999,10 +1853,18 @@ func _selection_targets_map() -> bool:
 	var nodes := selection.get_selected_nodes()
 	for node in nodes:
 		if node is BrushForgeMap:
-			map_node = node as BrushForgeMap
+			var next_map := node as BrushForgeMap
+			if map_node != next_map:
+				map_node = next_map
+				_invalidate_brush_mesh_cache()
+				_invalidate_subdivide_face_cache()
 			return true
 		if node is MeshInstance3D and (node as MeshInstance3D).get_parent() is BrushForgeMap:
-			map_node = (node as MeshInstance3D).get_parent() as BrushForgeMap
+			var next_mesh_map := (node as MeshInstance3D).get_parent() as BrushForgeMap
+			if map_node != next_mesh_map:
+				map_node = next_mesh_map
+				_invalidate_brush_mesh_cache()
+				_invalidate_subdivide_face_cache()
 			return true
 	return false
 
@@ -2011,162 +1873,198 @@ func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
 		return AFTER_GUI_INPUT_PASS
 	if not _ensure_map_node(false):
 		return AFTER_GUI_INPUT_PASS
+
+	if event is InputEventKey:
+		var global_key_result := _handle_forward_global_key_event(event as InputEventKey)
+		if global_key_result == AFTER_GUI_INPUT_STOP:
+			return AFTER_GUI_INPUT_STOP
 	if not _is_custom_tool_enabled():
 		return AFTER_GUI_INPUT_PASS
 
 	if event is InputEventKey:
-		var key_event := event as InputEventKey
-		if key_event.pressed and not key_event.echo:
-			if key_event.keycode == KEY_MINUS or key_event.keycode == KEY_KP_SUBTRACT:
-				_scale_grid_size(0.5)
-				return AFTER_GUI_INPUT_STOP
-			if key_event.keycode == KEY_EQUAL or key_event.keycode == KEY_PLUS or key_event.keycode == KEY_KP_ADD:
-				_scale_grid_size(2.0)
-				return AFTER_GUI_INPUT_STOP
-			if _is_arrow_key(key_event.keycode):
-				if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
-					return AFTER_GUI_INPUT_STOP
-				return AFTER_GUI_INPUT_STOP
-			if key_event.keycode == KEY_PAGEUP or key_event.keycode == KEY_PAGEDOWN:
-				if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
-					return AFTER_GUI_INPUT_STOP
-				return AFTER_GUI_INPUT_STOP
-			if clip_tool_button != null and clip_tool_button.button_pressed:
-				if key_event.keycode == KEY_ENTER:
-					if _apply_clip_from_points():
-						return AFTER_GUI_INPUT_STOP
-				if key_event.keycode == KEY_BACKSPACE or key_event.keycode == KEY_DELETE:
-					if clip_points.size() > 0:
-						clip_points.remove_at(clip_points.size() - 1)
-						_update_clip_tool_gizmo()
-						return AFTER_GUI_INPUT_STOP
-			if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
-				return AFTER_GUI_INPUT_STOP
-			if brush_tool_button != null and brush_tool_button.button_pressed and key_event.keycode == KEY_ENTER:
-				if _commit_brush_tool_preview():
-					return AFTER_GUI_INPUT_STOP
-			if move_brush_button != null and move_brush_button.button_pressed and _is_blocked_editor_transform_key(key_event):
-				return AFTER_GUI_INPUT_STOP
+		return _handle_forward_tool_key_event(event as InputEventKey)
 
 	if event is InputEventMouseButton:
-		var mb := event as InputEventMouseButton
-		if texture_tool_button != null and texture_tool_button.button_pressed:
-			return _handle_texture_tool_mouse_button(camera, mb)
-		if paint_tool_button != null and paint_tool_button.button_pressed:
-			return _handle_paint_tool_mouse_button(camera, mb)
-		if subdivide_tool_button != null and subdivide_tool_button.button_pressed:
-			return _handle_subdivide_tool_mouse_button(camera, mb)
-		if clip_tool_button != null and clip_tool_button.button_pressed:
-			return _handle_clip_tool_mouse_button(camera, mb)
-		if brush_tool_button != null and brush_tool_button.button_pressed:
-			return _handle_brush_tool_mouse_button(camera, mb)
-		if vertex_tool_button != null and vertex_tool_button.button_pressed:
-			return _handle_vertex_tool_mouse_button(camera, mb)
-		if edge_tool_button != null and edge_tool_button.button_pressed:
-			return _handle_edge_tool_mouse_button(camera, mb)
-		if face_tool_button != null and face_tool_button.button_pressed:
-			return _handle_face_tool_mouse_button(camera, mb)
-		if rotate_tool_button != null and rotate_tool_button.button_pressed:
-			return _handle_rotate_tool_mouse_button(camera, mb)
-		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
-			var pick := _pick_brush_and_face(camera, mb.position)
-			if pick.is_empty():
-				if _is_mouse_near_selected_brush(camera, mb.position):
-					if move_brush_button != null and move_brush_button.button_pressed:
-						_begin_history_action()
-						_begin_move_drag(camera, mb.position, mb.alt_pressed, mb.ctrl_pressed)
-					return AFTER_GUI_INPUT_STOP
-				_clear_selection()
-				return AFTER_GUI_INPUT_STOP
+		return _handle_forward_mouse_button_event(camera, event as InputEventMouseButton)
 
-			pending_click_active = true
-			pending_click_pick = pick
-			pending_click_mouse = mb.position
-			pending_click_alt = mb.alt_pressed
-			pending_click_ctrl_drag_clone = false
-			var pick_mesh := pick["mesh"] as MeshInstance3D
-			var pick_index := int(pick["index"])
-			if mb.ctrl_pressed and not mb.shift_pressed:
-				if move_brush_button != null and move_brush_button.button_pressed and pick_index == selected_brush_index:
-					pending_click_ctrl_drag_clone = true
-					return AFTER_GUI_INPUT_STOP
-				_select_brush(pick_mesh, pick_index, true)
-				_clear_face_selection()
+	if event is InputEventMouseMotion:
+		return _handle_forward_mouse_motion_event(camera, event as InputEventMouseMotion)
+
+	return AFTER_GUI_INPUT_PASS
+
+func _handle_forward_global_key_event(key_event: InputEventKey) -> int:
+	if not key_event.pressed or key_event.echo:
+		return AFTER_GUI_INPUT_PASS
+	if key_event.keycode != KEY_DELETE and key_event.keycode != KEY_BACKSPACE:
+		return AFTER_GUI_INPUT_PASS
+	if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
+		return AFTER_GUI_INPUT_STOP
+	# Always swallow delete/backspace while editing BrushForge to avoid editor node-delete prompts.
+	return AFTER_GUI_INPUT_STOP
+
+func _handle_forward_tool_key_event(key_event: InputEventKey) -> int:
+	if not key_event.pressed or key_event.echo:
+		return AFTER_GUI_INPUT_PASS
+	match key_event.keycode:
+		KEY_ESCAPE:
+			if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
+				return AFTER_GUI_INPUT_STOP
+			if pending_click_active:
 				pending_click_active = false
 				pending_click_pick = {}
 				pending_click_alt = false
 				pending_click_ctrl_drag_clone = false
 				return AFTER_GUI_INPUT_STOP
-			if mb.shift_pressed:
-				var face_index := int(pick["face_index"])
-				_select_brush(pick_mesh, pick_index)
-				_select_face(face_index)
-				_begin_history_action()
-				_begin_face_drag(mb.position, face_index, mb.ctrl_pressed)
+			if clip_tool_button != null and clip_tool_button.button_pressed and clip_points.size() > 0:
+				clip_points.clear()
+				_update_clip_tool_gizmo()
 				return AFTER_GUI_INPUT_STOP
-
-			var preserve_multi := _is_brush_selected(pick_index)
-			_select_brush(pick_mesh, pick_index, preserve_multi)
-			_clear_face_selection()
-			_begin_history_action()
-			_begin_move_drag(camera, mb.position, mb.alt_pressed, mb.ctrl_pressed)
+		KEY_MINUS, KEY_KP_SUBTRACT:
+			_scale_grid_size(0.5)
 			return AFTER_GUI_INPUT_STOP
-
-		elif mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed:
-			if pending_click_active and not surface_draw_active and not move_drag_active and not face_drag_active:
-				if not pending_click_ctrl_drag_clone:
-					_select_brush(pending_click_pick["mesh"] as MeshInstance3D, int(pending_click_pick["index"]))
-					_clear_face_selection()
-
-			if move_drag_active or face_drag_active:
-				_end_history_action()
-
-			if surface_draw_active:
-				_end_history_action()
-				var meshes := _get_brush_meshes()
-				if surface_draw_brush_index >= 0 and surface_draw_brush_index < meshes.size():
-					var mesh := meshes[surface_draw_brush_index]
-					if mesh != null:
-						_select_brush(mesh, surface_draw_brush_index)
-
-			move_drag_active = false
-			face_drag_active = false
-			face_drag_ctrl_mode = false
-			face_drag_extrude_index = -1
-			surface_draw_active = false
-			surface_draw_brush_index = -1
-			pending_click_active = false
-			pending_click_pick = {}
-			pending_click_alt = false
-			pending_click_ctrl_drag_clone = false
+		KEY_EQUAL, KEY_PLUS, KEY_KP_ADD:
+			_scale_grid_size(2.0)
 			return AFTER_GUI_INPUT_STOP
-
-	if event is InputEventMouseMotion and brush_tool_button != null and brush_tool_button.button_pressed:
-		var bmm := event as InputEventMouseMotion
-		return _handle_brush_tool_mouse_motion(camera, bmm)
-	if event is InputEventMouseMotion and paint_tool_button != null and paint_tool_button.button_pressed:
-		var pmm := event as InputEventMouseMotion
-		return _handle_paint_tool_mouse_motion(camera, pmm)
-	if event is InputEventMouseMotion and texture_tool_button != null and texture_tool_button.button_pressed:
-		var tmm := event as InputEventMouseMotion
-		return _handle_texture_tool_mouse_motion(camera, tmm)
-	if event is InputEventMouseMotion and rotate_tool_button != null and rotate_tool_button.button_pressed and rotate_drag_active:
-		var rmm := event as InputEventMouseMotion
-		_update_rotate_drag(camera, rmm.position)
+		KEY_PAGEUP, KEY_PAGEDOWN:
+			if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
+				return AFTER_GUI_INPUT_STOP
+			return AFTER_GUI_INPUT_STOP
+		KEY_ENTER:
+			if clip_tool_button != null and clip_tool_button.button_pressed and _apply_clip_from_points():
+				return AFTER_GUI_INPUT_STOP
+			if brush_tool_button != null and brush_tool_button.button_pressed and _commit_brush_tool_preview():
+				return AFTER_GUI_INPUT_STOP
+		KEY_BACKSPACE, KEY_DELETE:
+			if clip_tool_button != null and clip_tool_button.button_pressed and clip_points.size() > 0:
+				clip_points.remove_at(clip_points.size() - 1)
+				_update_clip_tool_gizmo()
+				return AFTER_GUI_INPUT_STOP
+	if EDITOR_MATH_UTILS_SCRIPT.is_arrow_key(key_event.keycode):
+		if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
+			return AFTER_GUI_INPUT_STOP
 		return AFTER_GUI_INPUT_STOP
-	if event is InputEventMouseMotion and vertex_tool_button != null and vertex_tool_button.button_pressed:
-		var vmm := event as InputEventMouseMotion
-		return _handle_vertex_tool_mouse_motion(camera, vmm)
-	if event is InputEventMouseMotion and edge_tool_button != null and edge_tool_button.button_pressed and vertex_drag_active:
-		var emm := event as InputEventMouseMotion
-		return _handle_vertex_tool_mouse_motion(camera, emm)
-	if event is InputEventMouseMotion and face_tool_button != null and face_tool_button.button_pressed and vertex_drag_active:
-		var fsm := event as InputEventMouseMotion
-		return _handle_vertex_tool_mouse_motion(camera, fsm)
+	if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
+		return AFTER_GUI_INPUT_STOP
+	if move_brush_button != null and move_brush_button.button_pressed and EDITOR_MATH_UTILS_SCRIPT.is_blocked_editor_transform_key(key_event):
+		return AFTER_GUI_INPUT_STOP
+	return AFTER_GUI_INPUT_PASS
 
-	if event is InputEventMouseMotion and pending_click_active and not move_drag_active and not face_drag_active and not surface_draw_active:
-		var pmm := event as InputEventMouseMotion
-		if pmm.position.distance_to(pending_click_mouse) > CLICK_DRAG_THRESHOLD:
+func _handle_forward_mouse_button_event(camera: Camera3D, mb: InputEventMouseButton) -> int:
+	var active_tool_result := _dispatch_pressed_tool_mouse_button(camera, mb)
+	if active_tool_result != -1:
+		return active_tool_result
+	if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+		return _handle_forward_left_mouse_press(camera, mb)
+	if mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed:
+		return _handle_forward_left_mouse_release()
+	return AFTER_GUI_INPUT_PASS
+
+func _dispatch_pressed_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButton) -> int:
+	var tool_handlers := [
+		{"button": texture_tool_button, "handler": Callable(self, "_handle_texture_tool_mouse_button")},
+		{"button": paint_tool_button, "handler": Callable(self, "_handle_paint_tool_mouse_button")},
+		{"button": subdivide_tool_button, "handler": Callable(self, "_handle_subdivide_tool_mouse_button")},
+		{"button": clip_tool_button, "handler": Callable(self, "_handle_clip_tool_mouse_button")},
+		{"button": brush_tool_button, "handler": Callable(self, "_handle_brush_tool_mouse_button")},
+		{"button": vertex_tool_button, "handler": Callable(self, "_handle_vertex_tool_mouse_button")},
+		{"button": edge_tool_button, "handler": Callable(self, "_handle_edge_tool_mouse_button")},
+		{"button": face_tool_button, "handler": Callable(self, "_handle_face_tool_mouse_button")},
+		{"button": rotate_tool_button, "handler": Callable(self, "_handle_rotate_tool_mouse_button")},
+	]
+	for item in tool_handlers:
+		var button: Button = item["button"]
+		if button != null and button.button_pressed:
+			var handler: Callable = item["handler"]
+			return int(handler.call(camera, mb))
+	return -1
+
+func _handle_forward_left_mouse_press(camera: Camera3D, mb: InputEventMouseButton) -> int:
+	var pick := _pick_brush_and_face(camera, mb.position)
+	if pick.is_empty():
+		if _is_mouse_near_selected_brush(camera, mb.position):
+			if move_brush_button != null and move_brush_button.button_pressed:
+				_begin_history_action()
+				_begin_move_drag(camera, mb.position, mb.alt_pressed, mb.ctrl_pressed)
+			return AFTER_GUI_INPUT_STOP
+		_clear_selection()
+		return AFTER_GUI_INPUT_STOP
+
+	pending_click_active = true
+	pending_click_pick = pick
+	pending_click_mouse = mb.position
+	pending_click_alt = mb.alt_pressed
+	pending_click_ctrl_drag_clone = false
+	var pick_mesh := pick["mesh"] as MeshInstance3D
+	var pick_index := int(pick["index"])
+	if mb.ctrl_pressed and not mb.shift_pressed:
+		if move_brush_button != null and move_brush_button.button_pressed and pick_index == selected_brush_index:
+			pending_click_ctrl_drag_clone = true
+			return AFTER_GUI_INPUT_STOP
+		_select_brush(pick_mesh, pick_index, true)
+		_clear_face_selection()
+		pending_click_active = false
+		pending_click_pick = {}
+		pending_click_alt = false
+		pending_click_ctrl_drag_clone = false
+		return AFTER_GUI_INPUT_STOP
+	if mb.shift_pressed:
+		var face_index := int(pick["face_index"])
+		_select_brush(pick_mesh, pick_index)
+		_select_face(face_index)
+		_begin_history_action()
+		_begin_face_drag(mb.position, face_index, mb.ctrl_pressed)
+		return AFTER_GUI_INPUT_STOP
+
+	var preserve_multi := _is_brush_selected(pick_index)
+	_select_brush(pick_mesh, pick_index, preserve_multi)
+	_clear_face_selection()
+	_begin_history_action()
+	_begin_move_drag(camera, mb.position, mb.alt_pressed, mb.ctrl_pressed)
+	return AFTER_GUI_INPUT_STOP
+
+func _handle_forward_left_mouse_release() -> int:
+	if pending_click_active and not surface_draw_active and not move_drag_active and not face_drag_active:
+		if not pending_click_ctrl_drag_clone:
+			_select_brush(pending_click_pick["mesh"] as MeshInstance3D, int(pending_click_pick["index"]))
+			_clear_face_selection()
+
+	if move_drag_active or face_drag_active:
+		_end_history_action()
+		call_deferred("_flush_pending_mesh_rebuilds")
+
+	if surface_draw_active:
+		_end_history_action()
+		var meshes := _get_brush_meshes()
+		if surface_draw_brush_index >= 0 and surface_draw_brush_index < meshes.size():
+			var mesh := meshes[surface_draw_brush_index]
+			if mesh != null:
+				_select_brush(mesh, surface_draw_brush_index)
+
+	move_drag_active = false
+	face_drag_active = false
+	face_drag_ctrl_mode = false
+	face_drag_extrude_index = -1
+	surface_draw_active = false
+	surface_draw_brush_index = -1
+	pending_click_active = false
+	pending_click_pick = {}
+	pending_click_alt = false
+	pending_click_ctrl_drag_clone = false
+	return AFTER_GUI_INPUT_STOP
+
+func _handle_forward_mouse_motion_event(camera: Camera3D, mm: InputEventMouseMotion) -> int:
+	var tool_motion_result := _dispatch_pressed_tool_mouse_motion(camera, mm)
+	if tool_motion_result != -1:
+		return tool_motion_result
+	if rotate_tool_button != null and rotate_tool_button.button_pressed and rotate_drag_active:
+		_update_rotate_drag(camera, mm.position)
+		return AFTER_GUI_INPUT_STOP
+	if _is_tool_button_pressed(vertex_tool_button):
+		return _handle_vertex_tool_mouse_motion(camera, mm)
+	if (_is_tool_button_pressed(edge_tool_button) or _is_tool_button_pressed(face_tool_button)) and vertex_drag_active:
+		return _handle_vertex_tool_mouse_motion(camera, mm)
+	if pending_click_active and not move_drag_active and not face_drag_active and not surface_draw_active:
+		if mm.position.distance_to(pending_click_mouse) > CLICK_DRAG_THRESHOLD:
 			var pending_index := int(pending_click_pick.get("index", -1))
 			if pending_index >= 0 and pending_index == selected_brush_index:
 				_begin_history_action()
@@ -2176,23 +2074,32 @@ func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
 				_clear_face_selection()
 				_begin_move_drag(camera, pending_click_mouse, pending_click_alt, pending_click_ctrl_drag_clone, pending_click_ctrl_drag_clone)
 				return AFTER_GUI_INPUT_STOP
-
-	if event is InputEventMouseMotion and surface_draw_active:
-		var smm := event as InputEventMouseMotion
-		_update_surface_draw(camera, smm.position)
+	if surface_draw_active:
+		_update_surface_draw(camera, mm.position)
 		return AFTER_GUI_INPUT_STOP
-
-	if event is InputEventMouseMotion and face_drag_active:
-		var fmm := event as InputEventMouseMotion
-		_update_face_drag(camera, fmm.position)
+	if face_drag_active:
+		_update_face_drag(camera, mm.position)
 		return AFTER_GUI_INPUT_STOP
-
-	if event is InputEventMouseMotion and move_drag_active:
-		var mm := event as InputEventMouseMotion
+	if move_drag_active:
 		_update_move_drag(camera, mm.position, mm.alt_pressed)
 		return AFTER_GUI_INPUT_STOP
-
 	return AFTER_GUI_INPUT_PASS
+
+func _dispatch_pressed_tool_mouse_motion(camera: Camera3D, mm: InputEventMouseMotion) -> int:
+	var tool_handlers := [
+		{"button": brush_tool_button, "handler": Callable(self, "_handle_brush_tool_mouse_motion")},
+		{"button": paint_tool_button, "handler": Callable(self, "_handle_paint_tool_mouse_motion")},
+		{"button": texture_tool_button, "handler": Callable(self, "_handle_texture_tool_mouse_motion")},
+	]
+	for item in tool_handlers:
+		var button: Button = item["button"]
+		if button != null and button.button_pressed:
+			var handler: Callable = item["handler"]
+			return int(handler.call(camera, mm))
+	return -1
+
+func _is_tool_button_pressed(button: Button) -> bool:
+	return button != null and button.button_pressed
 
 func _handle_texture_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButton) -> int:
 	if mb.button_index != MOUSE_BUTTON_LEFT:
@@ -2224,21 +2131,22 @@ func _handle_paint_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButton
 	if mb.button_index != MOUSE_BUTTON_LEFT:
 		return AFTER_GUI_INPUT_PASS
 	if not mb.pressed:
-		paint_drag_active = false
-		paint_last_stamp = INVALID_STAMP_POINT
-		if history_action_active:
-			_end_history_action()
-		return AFTER_GUI_INPUT_STOP
+		if paint_drag_active:
+			paint_drag_active = false
+			paint_last_stamp = INVALID_STAMP_POINT
+			if history_action_active:
+				_end_history_action()
+			return AFTER_GUI_INPUT_STOP
+		return AFTER_GUI_INPUT_PASS
 	var pick := _pick_brush_and_face(camera, mb.position)
 	if pick.is_empty():
+		paint_hover_valid = false
+		_update_gizmos()
 		return AFTER_GUI_INPUT_PASS
-	var target_mesh := pick["mesh"] as MeshInstance3D
-	var target_index := int(pick["index"])
-	var target_face := int(pick["face_index"])
-	if target_mesh == null or target_index < 0 or target_face < 0:
+	var target_index := int(pick.get("index", -1))
+	var target_face := int(pick.get("face_index", -1))
+	if target_index < 0 or target_face < 0:
 		return AFTER_GUI_INPUT_PASS
-	_select_brush(target_mesh, target_index)
-	_select_face(target_face)
 	if paint_apply_mode_option != null and paint_apply_mode_option.get_selected_id() == PAINT_APPLY_BUCKET:
 		if not history_action_active:
 			_begin_history_action()
@@ -2265,7 +2173,6 @@ func _paint_fill_face(brush_index: int, face_index: int, color: Color) -> void:
 		return
 	var key := str(face_index)
 	brush.face_paint_colors[key] = color
-	# Bucket is an explicit flat fill mode; clear procedural strokes for this face.
 	brush.face_paint_strokes[key] = []
 	_rebuild_painted_brush_mesh(brush_index)
 
@@ -2292,12 +2199,17 @@ func _handle_subdivide_tool_mouse_button(camera: Camera3D, mb: InputEventMouseBu
 		return AFTER_GUI_INPUT_PASS
 	var target_mesh := pick["mesh"] as MeshInstance3D
 	var target_index := int(pick["index"])
-	var target_face := int(pick["face_index"])
-	if target_mesh == null or target_index < 0 or target_face < 0:
+	if target_mesh == null or target_index < 0:
+		return AFTER_GUI_INPUT_PASS
+	var exact_hit := EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, target_index, camera, mb.position)
+	if exact_hit.is_empty():
+		return AFTER_GUI_INPUT_PASS
+	var target_face := int(exact_hit.get("face_index", -1))
+	if target_face < 0:
 		return AFTER_GUI_INPUT_PASS
 	_select_brush(target_mesh, target_index)
 	_select_face(target_face)
-	return AFTER_GUI_INPUT_STOP
+	return AFTER_GUI_INPUT_STOP if selected_face_index >= 0 else AFTER_GUI_INPUT_PASS
 
 func _handle_texture_tool_mouse_motion(camera: Camera3D, mm: InputEventMouseMotion) -> int:
 	if (mm.button_mask & MOUSE_BUTTON_MASK_LEFT) == 0:
@@ -2500,8 +2412,8 @@ func _handle_brush_tool_mouse_motion(camera: Camera3D, mm: InputEventMouseMotion
 		_update_brush_rect_from_mouse(camera, mm.position)
 		return AFTER_GUI_INPUT_STOP
 	if brush_extrude_active and brush_draw_has_rect:
-		var raw := _axis_delta_from_mouse(camera, brush_draw_plane_origin, brush_draw_face_normal, mm.position)
-		brush_extrude_depth = _snap_float(raw, grid_size)
+		var raw := EDITOR_MATH_UTILS_SCRIPT.axis_delta_from_mouse(camera, brush_draw_plane_origin, brush_draw_face_normal, mm.position, drag_start_mouse)
+		brush_extrude_depth = EDITOR_MATH_UTILS_SCRIPT.snap_float(raw, grid_size)
 		if absf(brush_extrude_depth) < grid_size:
 			brush_extrude_depth = signf(brush_extrude_depth) * grid_size if absf(brush_extrude_depth) > 0.0 else grid_size
 		_update_brush_tool_gizmos()
@@ -2746,7 +2658,7 @@ func _update_rotate_drag(camera: Camera3D, mouse_pos: Vector2) -> void:
 func _pick_rotate_axis(camera: Camera3D, mouse_pos: Vector2) -> Vector3:
 	if selected_mesh == null:
 		return Vector3.ZERO
-	var b := _mesh_bounds_world(selected_mesh)
+	var b := GIZMO_SHAPE_BUILDER_SCRIPT.mesh_bounds_world(selected_mesh)
 	var center: Vector3 = b["center"]
 	var half_size: Vector3 = b["half_size"]
 	var radius := maxf(maxf(half_size.x, half_size.y), half_size.z) * 1.25
@@ -2784,7 +2696,7 @@ func _begin_vertex_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool,
 	drag_start_mouse = mouse_pos
 	drag_alt_mode = alt_pressed
 	drag_plane_y = start_anchor.y
-	var plane_hit_hit := _ray_plane_hit(camera, mouse_pos, drag_plane_y)
+	var plane_hit_hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_y(camera, mouse_pos, drag_plane_y)
 	if plane_hit_hit != null:
 		var plane_hit: Vector3 = plane_hit_hit
 		drag_start_plane_hit = plane_hit
@@ -2814,7 +2726,7 @@ func _update_vertex_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool
 		var selected_vertices := _get_selected_vertices_world(brush)
 		vertex_drag_plane_indices = _resolve_drag_plane_indices(brush, selected_vertices)
 		drag_plane_y = vertex_drag_start_anchor.y
-		var new_plane_hit_hit := _ray_plane_hit(camera, mouse_pos, drag_plane_y)
+		var new_plane_hit_hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_y(camera, mouse_pos, drag_plane_y)
 		if new_plane_hit_hit != null:
 			var new_plane_hit: Vector3 = new_plane_hit_hit
 			drag_start_plane_hit = new_plane_hit
@@ -2822,13 +2734,13 @@ func _update_vertex_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool
 	var target := vertex_drag_start_anchor
 	if alt_pressed:
 		var dy := drag_start_mouse.y - mouse_pos.y
-		var units_per_pixel := _world_units_per_pixel_at(camera, vertex_drag_start_anchor)
+		var units_per_pixel := EDITOR_MATH_UTILS_SCRIPT.world_units_per_pixel_at(camera, vertex_drag_start_anchor)
 		var raw_y := vertex_drag_start_anchor.y + dy * units_per_pixel * MOVE_SENSITIVITY_Y_SCALE
 		var y_delta := raw_y - vertex_drag_start_anchor.y
-		y_delta = _snap_float(y_delta, grid_size)
+		y_delta = EDITOR_MATH_UTILS_SCRIPT.snap_float(y_delta, grid_size)
 		target.y = vertex_drag_start_anchor.y + y_delta
 	else:
-		var plane_hit_hit := _ray_plane_hit(camera, mouse_pos, drag_plane_y)
+		var plane_hit_hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_y(camera, mouse_pos, drag_plane_y)
 		if plane_hit_hit != null:
 			var plane_hit: Vector3 = plane_hit_hit
 			var delta_plane: Vector3 = plane_hit - drag_start_plane_hit
@@ -2852,7 +2764,7 @@ func _update_vertex_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool
 			target.y = drag_plane_y
 
 	var delta := target - vertex_drag_start_anchor
-	delta = _snap_vector(delta, grid_size)
+	delta = EDITOR_MATH_UTILS_SCRIPT.snap_vector(delta, grid_size)
 	_restore_brush_planes_from_snapshot(brush, vertex_drag_start_planes)
 
 	var moved_vertices: Array[Vector3] = []
@@ -3229,14 +3141,14 @@ func _refresh_brush_bounds_from_planes(brush: BrushForge, mesh: MeshInstance3D) 
 func _begin_brush_rect_draw(face_index: int, hit: Vector3) -> void:
 	brush_draw_has_rect = false
 	brush_extrude_depth = 0.0
-	var basis := _face_basis_from_index(face_index)
+	var basis := EDITOR_MATH_UTILS_SCRIPT.face_basis_from_index(face_index)
 	brush_draw_face_normal = basis["normal"]
 	brush_draw_axis_u = basis["u"]
 	brush_draw_axis_v = basis["v"]
 	var plane_dist := hit.dot(brush_draw_face_normal)
 	brush_draw_plane_origin = brush_draw_face_normal * plane_dist
-	brush_draw_start_u = _snap_float(hit.dot(brush_draw_axis_u), grid_size)
-	brush_draw_start_v = _snap_float(hit.dot(brush_draw_axis_v), grid_size)
+	brush_draw_start_u = EDITOR_MATH_UTILS_SCRIPT.snap_float(hit.dot(brush_draw_axis_u), grid_size)
+	brush_draw_start_v = EDITOR_MATH_UTILS_SCRIPT.snap_float(hit.dot(brush_draw_axis_v), grid_size)
 	brush_draw_min_u = brush_draw_start_u
 	brush_draw_max_u = brush_draw_start_u
 	brush_draw_min_v = brush_draw_start_v
@@ -3244,12 +3156,12 @@ func _begin_brush_rect_draw(face_index: int, hit: Vector3) -> void:
 	_update_brush_tool_gizmos()
 
 func _update_brush_rect_from_mouse(camera: Camera3D, mouse_pos: Vector2) -> void:
-	var hit := _ray_plane_hit_normal(camera, mouse_pos, brush_draw_plane_origin, brush_draw_face_normal)
+	var hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_normal(camera, mouse_pos, brush_draw_plane_origin, brush_draw_face_normal)
 	if hit == null:
 		return
 	var hp: Vector3 = hit
-	var u := _snap_float(hp.dot(brush_draw_axis_u), grid_size)
-	var v := _snap_float(hp.dot(brush_draw_axis_v), grid_size)
+	var u := EDITOR_MATH_UTILS_SCRIPT.snap_float(hp.dot(brush_draw_axis_u), grid_size)
+	var v := EDITOR_MATH_UTILS_SCRIPT.snap_float(hp.dot(brush_draw_axis_v), grid_size)
 	brush_draw_min_u = minf(brush_draw_start_u, u)
 	brush_draw_max_u = maxf(brush_draw_start_u, u)
 	brush_draw_min_v = minf(brush_draw_start_v, v)
@@ -3260,33 +3172,6 @@ func _update_brush_rect_from_mouse(camera: Camera3D, mouse_pos: Vector2) -> void
 		brush_draw_max_v = brush_draw_min_v + grid_size
 	brush_draw_has_rect = true
 	_update_brush_tool_gizmos()
-
-func _face_basis_from_index(face_index: int) -> Dictionary:
-	match face_index:
-		0:
-			return {"normal": Vector3.RIGHT, "u": Vector3.FORWARD, "v": Vector3.UP}
-		1:
-			return {"normal": Vector3.LEFT, "u": Vector3.BACK, "v": Vector3.UP}
-		2:
-			return {"normal": Vector3.UP, "u": Vector3.RIGHT, "v": Vector3.BACK}
-		3:
-			return {"normal": Vector3.DOWN, "u": Vector3.RIGHT, "v": Vector3.FORWARD}
-		4:
-			return {"normal": Vector3.BACK, "u": Vector3.RIGHT, "v": Vector3.UP}
-		5:
-			return {"normal": Vector3.FORWARD, "u": Vector3.LEFT, "v": Vector3.UP}
-	return {"normal": Vector3.UP, "u": Vector3.RIGHT, "v": Vector3.FORWARD}
-
-func _ray_plane_hit_normal(camera: Camera3D, mouse_pos: Vector2, plane_origin: Vector3, plane_normal: Vector3) -> Variant:
-	var origin := camera.project_ray_origin(mouse_pos)
-	var dir := camera.project_ray_normal(mouse_pos)
-	var denom := dir.dot(plane_normal)
-	if absf(denom) < 0.0001:
-		return null
-	var t := (plane_origin - origin).dot(plane_normal) / denom
-	if t < 0.0:
-		return null
-	return origin + dir * t
 
 func _get_pick_hit_point_from_mouse(camera: Camera3D, pick: Dictionary, mouse_pos: Vector2) -> Vector3:
 	var origin := camera.project_ray_origin(mouse_pos)
@@ -3316,6 +3201,7 @@ func _commit_brush_tool_preview() -> bool:
 	mi.position = center
 	mi.set_meta(EDIT_LOCK_META, true)
 	map_node.add_brush(new_b, mi)
+	_invalidate_brush_mesh_cache()
 	_select_brush(mi, map_node.brush_data.size() - 1)
 	_end_history_action()
 	brush_draw_has_rect = false
@@ -3357,6 +3243,43 @@ func _is_custom_tool_enabled() -> bool:
 		or (texture_tool_button != null and texture_tool_button.button_pressed)
 
 func _update_tool_button_states() -> void:
+	var selected_lock_uvs := false
+	if map_node != null and selected_brush_index >= 0 and selected_brush_index < map_node.brush_data.size():
+		var selected_brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
+		if selected_brush != null:
+			selected_lock_uvs = selected_brush.lock_uvs
+	var selected_subdiv_x := 1
+	var selected_subdiv_y := 1
+	var subdivide_ui_visible := plugin_active and subdivide_tool_button != null and subdivide_tool_button.button_pressed
+	if subdivide_ui_visible and map_node != null and selected_brush_index >= 0 and selected_face_index >= 0 and selected_brush_index < map_node.brush_data.size():
+		var brush2: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
+		if brush2 != null:
+			var xy := _read_face_subdivision_xy(brush2, selected_face_index)
+			selected_subdiv_x = int(xy.get("x", 1))
+			selected_subdiv_y = int(xy.get("y", 1))
+	var ui_signature := "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % [
+		plugin_active,
+		selected_brush_index,
+		selected_face_index,
+		grid_size,
+		(move_brush_button != null and move_brush_button.button_pressed),
+		(brush_tool_button != null and brush_tool_button.button_pressed),
+		(clip_tool_button != null and clip_tool_button.button_pressed),
+		(vertex_tool_button != null and vertex_tool_button.button_pressed),
+		(edge_tool_button != null and edge_tool_button.button_pressed),
+		(face_tool_button != null and face_tool_button.button_pressed),
+		(rotate_tool_button != null and rotate_tool_button.button_pressed),
+		(paint_tool_button != null and paint_tool_button.button_pressed),
+		(subdivide_tool_button != null and subdivide_tool_button.button_pressed),
+		(texture_tool_button != null and texture_tool_button.button_pressed),
+		selected_lock_uvs,
+		BRUSH_MESH_BUILDER_SCRIPT.use_vertex_color_preview,
+		selected_subdiv_x,
+		selected_subdiv_y,
+	]
+	if ui_signature == tool_ui_state_signature:
+		return
+	tool_ui_state_signature = ui_signature
 	var can_use_clip := plugin_active and move_brush_button != null and move_brush_button.button_pressed and selected_brush_index >= 0
 	var can_use_move_subtools := plugin_active and move_brush_button != null and move_brush_button.button_pressed and selected_brush_index >= 0
 	if brush_tool_button != null:
@@ -3410,6 +3333,15 @@ func _update_tool_button_states() -> void:
 		mesh_preview_mode_button.button_pressed = BRUSH_MESH_BUILDER_SCRIPT.use_vertex_color_preview
 		mesh_preview_mode_button.text = "Mesh: Vertex Colors" if mesh_preview_mode_button.button_pressed else "Mesh: Textures"
 	var show_texture_ui := plugin_active and texture_tool_button != null and texture_tool_button.button_pressed
+	var show_paint_ui := plugin_active and paint_tool_button != null and paint_tool_button.button_pressed
+	if uv_card_panel != null:
+		uv_card_panel.visible = show_texture_ui
+	if materials_card_panel != null:
+		materials_card_panel.visible = show_texture_ui
+	if paint_card_panel != null:
+		paint_card_panel.visible = show_paint_ui
+	if subdivide_card_panel != null:
+		subdivide_card_panel.visible = subdivide_ui_visible
 	if texture_title_label != null:
 		texture_title_label.visible = show_texture_ui
 	if uv_section_toggle_button != null:
@@ -3419,7 +3351,7 @@ func _update_tool_button_states() -> void:
 	if texture_list != null:
 		texture_list.visible = show_texture_ui
 	if paint_color_picker != null:
-		paint_color_picker.visible = plugin_active and paint_tool_button != null and paint_tool_button.button_pressed
+		paint_color_picker.visible = show_paint_ui
 	if paint_section_label != null:
 		paint_section_label.visible = paint_color_picker != null and paint_color_picker.visible
 	if paint_preset_row != null:
@@ -3434,7 +3366,6 @@ func _update_tool_button_states() -> void:
 		paint_vertex_preview_button.visible = paint_color_picker != null and paint_color_picker.visible
 		if paint_vertex_preview_button.button_pressed != BRUSH_MESH_BUILDER_SCRIPT.use_vertex_color_preview:
 			paint_vertex_preview_button.button_pressed = BRUSH_MESH_BUILDER_SCRIPT.use_vertex_color_preview
-	var subdivide_ui_visible := plugin_active and subdivide_tool_button != null and subdivide_tool_button.button_pressed
 	if subdivide_lock_xy_button != null:
 		subdivide_lock_xy_button.visible = subdivide_ui_visible
 	if subdivide_x_spinbox != null:
@@ -3442,16 +3373,13 @@ func _update_tool_button_states() -> void:
 	if subdivide_y_spinbox != null:
 		subdivide_y_spinbox.visible = subdivide_ui_visible
 		subdivide_y_spinbox.editable = not (subdivide_lock_xy_button != null and subdivide_lock_xy_button.button_pressed)
-	if subdivide_ui_visible and map_node != null and selected_brush_index >= 0 and selected_face_index >= 0 and selected_brush_index < map_node.brush_data.size():
-		var brush2: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
-		if brush2 != null:
-			var xy := _read_face_subdivision_xy(brush2, selected_face_index)
-			var sx := int(xy.get("x", 1))
-			var sy := int(xy.get("y", 1))
-			if subdivide_x_spinbox != null and absf(subdivide_x_spinbox.value - sx) > 0.00001:
-				subdivide_x_spinbox.value = sx
-			if subdivide_y_spinbox != null and absf(subdivide_y_spinbox.value - sy) > 0.00001:
-				subdivide_y_spinbox.value = sy
+	if subdivide_ui_visible:
+		subdivide_controls_updating = true
+		if subdivide_x_spinbox != null and absf(subdivide_x_spinbox.value - selected_subdiv_x) > 0.00001:
+			subdivide_x_spinbox.value = selected_subdiv_x
+		if subdivide_y_spinbox != null and absf(subdivide_y_spinbox.value - selected_subdiv_y) > 0.00001:
+			subdivide_y_spinbox.value = selected_subdiv_y
+		subdivide_controls_updating = false
 	if subdivide_section_label != null:
 		subdivide_section_label.visible = subdivide_ui_visible
 
@@ -3501,7 +3429,7 @@ func _handle_clip_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButton)
 	if pick_index != selected_brush_index:
 		return AFTER_GUI_INPUT_STOP
 	var face_index := int(pick["face_index"])
-	var basis := _face_basis_from_index(face_index)
+	var basis := EDITOR_MATH_UTILS_SCRIPT.face_basis_from_index(face_index)
 	var n: Vector3 = basis["normal"]
 	if clip_points.is_empty():
 		clip_face_normal = n
@@ -3510,7 +3438,7 @@ func _handle_clip_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButton)
 			clip_points.clear()
 			clip_face_normal = n
 	var p := _get_pick_hit_point_from_mouse(camera, pick, mb.position)
-	p = _snap_vector(p, grid_size)
+	p = EDITOR_MATH_UTILS_SCRIPT.snap_vector(p, grid_size)
 	if clip_points.size() >= 3:
 		clip_points.clear()
 	clip_points.append(p)
@@ -3583,7 +3511,7 @@ func _begin_move_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool, c
 	drag_start_mouse = mouse_pos
 	drag_alt_mode = alt_pressed
 
-	var plane_hit_hit := _ray_plane_hit(camera, mouse_pos, drag_plane_y)
+	var plane_hit_hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_y(camera, mouse_pos, drag_plane_y)
 	if plane_hit_hit != null:
 		var plane_hit: Vector3 = plane_hit_hit
 		drag_start_plane_hit = plane_hit
@@ -3604,7 +3532,7 @@ func _update_move_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool) 
 					drag_start_brush_positions[idx] = snap_brush.position
 		drag_plane_y = drag_start_brush_pos.y
 		drag_start_mouse = mouse_pos
-		var new_plane_hit_hit := _ray_plane_hit(camera, mouse_pos, drag_plane_y)
+		var new_plane_hit_hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_y(camera, mouse_pos, drag_plane_y)
 		if new_plane_hit_hit != null:
 			var new_plane_hit: Vector3 = new_plane_hit_hit
 			drag_start_plane_hit = new_plane_hit
@@ -3612,13 +3540,13 @@ func _update_move_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool) 
 	var next_pos := drag_start_brush_pos
 	if alt_pressed:
 		var dy := drag_start_mouse.y - mouse_pos.y
-		var units_per_pixel := _world_units_per_pixel_at(camera, drag_start_brush_pos)
+		var units_per_pixel := EDITOR_MATH_UTILS_SCRIPT.world_units_per_pixel_at(camera, drag_start_brush_pos)
 		var raw_y := drag_start_brush_pos.y + dy * units_per_pixel * MOVE_SENSITIVITY_Y_SCALE
-		var snapped_dy := _snap_float(raw_y - drag_start_brush_pos.y, grid_size)
+		var snapped_dy := EDITOR_MATH_UTILS_SCRIPT.snap_float(raw_y - drag_start_brush_pos.y, grid_size)
 		next_pos.y = drag_start_brush_pos.y + snapped_dy
 		drag_plane_y = next_pos.y
 	else:
-		var plane_hit_hit := _ray_plane_hit(camera, mouse_pos, drag_plane_y)
+		var plane_hit_hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_y(camera, mouse_pos, drag_plane_y)
 		if plane_hit_hit != null:
 			var plane_hit: Vector3 = plane_hit_hit
 			var delta: Vector3 = plane_hit - drag_start_plane_hit
@@ -3643,7 +3571,7 @@ func _update_move_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool) 
 			next_pos.y = drag_plane_y
 
 	var drag_delta := next_pos - drag_start_brush_pos
-	drag_delta = _snap_vector(drag_delta, grid_size)
+	drag_delta = EDITOR_MATH_UTILS_SCRIPT.snap_vector(drag_delta, grid_size)
 	for idx in _get_selected_indices():
 		var start_pos := drag_start_brush_positions.get(idx, null)
 		if start_pos is Vector3:
@@ -3689,8 +3617,8 @@ func _update_face_drag(camera: Camera3D, mouse_pos: Vector2) -> void:
 	if face_drag_face_index < 0:
 		return
 
-	var axis_delta := _axis_delta_from_mouse(camera, face_drag_start_center, face_drag_axis, mouse_pos)
-	var axis_delta_snapped := _snap_float(axis_delta * face_drag_sign, grid_size)
+	var axis_delta := EDITOR_MATH_UTILS_SCRIPT.axis_delta_from_mouse(camera, face_drag_start_center, face_drag_axis, mouse_pos, drag_start_mouse)
+	var axis_delta_snapped := EDITOR_MATH_UTILS_SCRIPT.snap_float(axis_delta * face_drag_sign, grid_size)
 	if absf(axis_delta_snapped) < 0.0001:
 		return
 
@@ -3861,6 +3789,7 @@ func _create_extrude_brush_from_selected() -> int:
 	mi.position = copy.position
 	mi.set_meta(EDIT_LOCK_META, true)
 	map_node.add_brush(copy, mi)
+	_invalidate_brush_mesh_cache()
 	return map_node.brush_data.size() - 1
 
 func _pick_brush_and_face(camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
@@ -3877,9 +3806,9 @@ func _pick_brush_and_face(camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
 		var mesh := brush_meshes[i]
 		if mesh == null:
 			continue
-		var exact_hit := _pick_exact_face_on_brush(i, camera, mouse_pos)
+		var exact_hit := EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, i, camera, mouse_pos)
 		if exact_hit.is_empty():
-			var b := _mesh_bounds_world(mesh)
+			var b := GIZMO_SHAPE_BUILDER_SCRIPT.mesh_bounds_world(mesh)
 			var center: Vector3 = b["center"]
 			var screen_pos := camera.unproject_position(center)
 			var screen_dist := screen_pos.distance_to(mouse_pos)
@@ -3929,6 +3858,7 @@ func _begin_surface_draw() -> void:
 	mi.position = init_center
 	mi.set_meta(EDIT_LOCK_META, true)
 	map_node.add_brush(new_b, mi)
+	_invalidate_brush_mesh_cache()
 	surface_draw_brush_index = map_node.brush_data.size() - 1
 	surface_draw_active = true
 
@@ -3937,14 +3867,14 @@ func _update_surface_draw(camera: Camera3D, mouse_pos: Vector2) -> void:
 		return
 	if surface_draw_brush_index < 0:
 		return
-	var hit := _ray_plane_hit(camera, mouse_pos, surface_draw_start.y)
+	var hit := EDITOR_MATH_UTILS_SCRIPT.ray_plane_hit_y(camera, mouse_pos, surface_draw_start.y)
 	if hit == null:
 		return
 	var hit_pos: Vector3 = hit
-	var min_x := _snap_float(minf(surface_draw_start.x, hit_pos.x), grid_size)
-	var max_x := _snap_float(maxf(surface_draw_start.x, hit_pos.x), grid_size)
-	var min_z := _snap_float(minf(surface_draw_start.z, hit_pos.z), grid_size)
-	var max_z := _snap_float(maxf(surface_draw_start.z, hit_pos.z), grid_size)
+	var min_x := EDITOR_MATH_UTILS_SCRIPT.snap_float(minf(surface_draw_start.x, hit_pos.x), grid_size)
+	var max_x := EDITOR_MATH_UTILS_SCRIPT.snap_float(maxf(surface_draw_start.x, hit_pos.x), grid_size)
+	var min_z := EDITOR_MATH_UTILS_SCRIPT.snap_float(minf(surface_draw_start.z, hit_pos.z), grid_size)
+	var max_z := EDITOR_MATH_UTILS_SCRIPT.snap_float(maxf(surface_draw_start.z, hit_pos.z), grid_size)
 	if max_x - min_x < grid_size:
 		max_x = min_x + grid_size
 	if max_z - min_z < grid_size:
@@ -3965,18 +3895,33 @@ func _select_brush(mesh: MeshInstance3D, brush_index: int, additive: bool = fals
 		selected_brush_indices.append(brush_index)
 	selected_mesh = mesh
 	selected_brush_index = brush_index
+	_invalidate_subdivide_face_cache()
 	selected_vertex_indices.clear()
 	selected_vertex_anchor = Vector3.ZERO
 	_lock_editor_selection()
 	_update_gizmos()
 
 func _select_face(face_index: int) -> void:
+	if map_node == null or selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size():
+		selected_face_index = -1
+		_sync_texture_list_selection()
+		_update_gizmos()
+		return
+	var brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
+	if brush == null or face_index < 0 or face_index >= brush.planes.size():
+		selected_face_index = -1
+		_sync_texture_list_selection()
+		_update_gizmos()
+		return
 	selected_face_index = face_index
+	_invalidate_subdivide_face_cache()
+	_sync_subdivide_lock_mode_for_selected_face()
 	_sync_texture_list_selection()
 	_update_gizmos()
 
 func _clear_face_selection() -> void:
 	selected_face_index = -1
+	_invalidate_subdivide_face_cache()
 	_sync_texture_list_selection()
 	_update_gizmos()
 
@@ -3985,6 +3930,8 @@ func _clear_selection() -> void:
 	selected_brush_index = -1
 	selected_brush_indices.clear()
 	selected_face_index = -1
+	_invalidate_subdivide_face_cache()
+	pending_mesh_rebuild_indices.clear()
 	move_drag_active = false
 	face_drag_active = false
 	face_drag_ctrl_mode = false
@@ -4044,9 +3991,98 @@ func _apply_brush_position_by_index(brush_index: int, pos: Vector3) -> void:
 	brush.position = pos
 	mesh.position = pos
 	if not brush.lock_uvs:
-		mesh.mesh = _build_brush_mesh(brush)
+		if move_drag_active:
+			_queue_mesh_rebuild_for_brush(brush_index)
+		else:
+			mesh.mesh = _build_brush_mesh(brush)
 	if brush_index == selected_brush_index:
 		selected_mesh = mesh
+
+func _queue_mesh_rebuild_for_brush(brush_index: int) -> void:
+	if brush_index < 0:
+		return
+	pending_mesh_rebuild_indices[brush_index] = true
+
+func _flush_pending_mesh_rebuilds(max_per_call: int = 8) -> void:
+	if pending_mesh_rebuild_indices.is_empty() or map_node == null:
+		return
+	var meshes := _get_brush_meshes()
+	var processed := 0
+	for key in pending_mesh_rebuild_indices.keys():
+		if processed >= max_per_call:
+			break
+		var brush_index := int(key)
+		pending_mesh_rebuild_indices.erase(key)
+		if brush_index < 0 or brush_index >= map_node.brush_data.size() or brush_index >= meshes.size():
+			continue
+		var brush: BrushForge = map_node.brush_data[brush_index] as BrushForge
+		var mesh := meshes[brush_index]
+		if brush == null or mesh == null:
+			continue
+		mesh.mesh = _build_brush_mesh(brush)
+		processed += 1
+	if not pending_mesh_rebuild_indices.is_empty():
+		call_deferred("_flush_pending_mesh_rebuilds")
+
+func _sanitize_brush_face_data(brush: BrushForge) -> void:
+	if brush == null:
+		return
+	var valid_keys := {}
+	for i in range(brush.planes.size()):
+		valid_keys[str(i)] = true
+	var maps := [
+		brush.face_material_paths,
+		brush.face_uv_transforms,
+		brush.face_paint_colors,
+		brush.face_paint_strokes,
+		brush.face_subdivisions,
+	]
+	for m in maps:
+		var keys := (m as Dictionary).keys()
+		for key in keys:
+			var face_key := str(key)
+			if not valid_keys.has(face_key):
+				(m as Dictionary).erase(key)
+	var stroke_keys := brush.face_paint_strokes.keys()
+	for key in stroke_keys:
+		var strokes_raw = brush.face_paint_strokes.get(key, [])
+		if not (strokes_raw is Array):
+			brush.face_paint_strokes.erase(key)
+			continue
+		var cleaned: Array = []
+		for item in (strokes_raw as Array):
+			if not (item is Dictionary):
+				continue
+			var sd: Dictionary = item
+			var radius := float(sd.get("radius", 0.0))
+			var strength := float(sd.get("strength", 0.0))
+			if radius <= 0.0001 or strength <= 0.0001:
+				continue
+			cleaned.append(sd)
+		if cleaned.is_empty():
+			brush.face_paint_strokes.erase(key)
+		else:
+			brush.face_paint_strokes[key] = cleaned
+	var color_keys := brush.face_paint_colors.keys()
+	for key in color_keys:
+		var c = brush.face_paint_colors.get(key, null)
+		if c is Color and (c as Color).is_equal_approx(Color.WHITE):
+			brush.face_paint_colors.erase(key)
+	var subdiv_keys := brush.face_subdivisions.keys()
+	for key in subdiv_keys:
+		var raw = brush.face_subdivisions.get(key, 1)
+		var sx := 1
+		var sy := 1
+		if raw is Dictionary:
+			sx = clampi(int((raw as Dictionary).get("x", 1)), 1, 10)
+			sy = clampi(int((raw as Dictionary).get("y", sx)), 1, 10)
+		else:
+			sx = clampi(int(raw), 1, 10)
+			sy = sx
+		if sx <= 1 and sy <= 1:
+			brush.face_subdivisions.erase(key)
+		else:
+			brush.face_subdivisions[key] = {"x": sx, "y": sy}
 
 func _apply_selected_brush_shape(pos: Vector3, size: Vector3) -> void:
 	_apply_brush_shape(selected_brush_index, pos, size)
@@ -4132,18 +4168,6 @@ func _is_mouse_near_selected_brush(camera: Camera3D, mouse_pos: Vector2) -> bool
 	var screen_pos := camera.unproject_position(selected_mesh.global_position)
 	return screen_pos.distance_to(mouse_pos) <= PICK_FALLBACK_RADIUS * 1.5
 
-func _axis_delta_from_mouse(camera: Camera3D, world_origin: Vector3, axis: Vector3, mouse_pos: Vector2) -> float:
-	var screen_origin := camera.unproject_position(world_origin)
-	var screen_axis_tip := camera.unproject_position(world_origin + axis)
-	var axis_screen := screen_axis_tip - screen_origin
-	var axis_len := axis_screen.length()
-	if axis_len < 0.0001:
-		return 0.0
-	var axis_dir := axis_screen / axis_len
-	var mouse_delta := mouse_pos - drag_start_mouse
-	var pixels_along_axis := mouse_delta.dot(axis_dir)
-	return pixels_along_axis / axis_len
-
 func _delete_selected_brush() -> void:
 	if selected_brush_index < 0 or map_node == null:
 		return
@@ -4161,6 +4185,7 @@ func _delete_selected_brush() -> void:
 				if mesh_to_remove.get_parent() == map_node:
 					map_node.remove_child(mesh_to_remove)
 				mesh_to_remove.queue_free()
+	_invalidate_brush_mesh_cache()
 	_clear_selection()
 
 func _duplicate_selected_brush() -> void:
@@ -4192,6 +4217,7 @@ func _duplicate_selected_brushes() -> void:
 		mi.mesh = _build_brush_mesh(copy)
 		mi.position = copy.position
 		map_node.add_brush(copy, mi)
+		_invalidate_brush_mesh_cache()
 		new_indices.append(map_node.brush_data.size() - 1)
 	if new_indices.is_empty():
 		return
@@ -4251,22 +4277,12 @@ func _handle_trenchbroom_keybinds(event: InputEventKey) -> bool:
 			var brush: BrushForge = map_node.brush_data[idx] as BrushForge
 			if brush == null:
 				continue
-			_apply_brush_position_by_index(idx, _snap_vector(brush.position + delta, grid_size))
+			_apply_brush_position_by_index(idx, EDITOR_MATH_UTILS_SCRIPT.snap_vector(brush.position + delta, grid_size))
 		_update_gizmos()
 		_end_history_action()
 		return true
 
 	return false
-
-func _is_blocked_editor_transform_key(event: InputEventKey) -> bool:
-	return event.keycode == KEY_W \
-		or event.keycode == KEY_E \
-		or event.keycode == KEY_R \
-		or event.keycode == KEY_T \
-		or event.keycode == KEY_G
-
-func _is_arrow_key(keycode: int) -> bool:
-	return keycode == KEY_LEFT or keycode == KEY_RIGHT or keycode == KEY_UP or keycode == KEY_DOWN
 
 func _lock_all_brush_nodes() -> void:
 	if map_node == null:
@@ -4276,47 +4292,23 @@ func _lock_all_brush_nodes() -> void:
 			mesh.set_meta(EDIT_LOCK_META, true)
 
 func _lock_editor_selection() -> void:
+	if selection_lock_refresh_queued:
+		return
+	selection_lock_refresh_queued = true
+	call_deferred("_apply_editor_selection_lock")
+
+func _apply_editor_selection_lock() -> void:
+	selection_lock_refresh_queued = false
+	if not plugin_active or map_node == null or not _is_custom_tool_enabled():
+		return
 	var selection := get_editor_interface().get_selection()
 	if selection == null:
 		return
 	var selected_nodes := selection.get_selected_nodes()
-	for node in selected_nodes:
-		if node is Node:
-			selection.remove_node(node)
-
-func _ray_plane_hit(camera: Camera3D, mouse_pos: Vector2, plane_y: float) -> Variant:
-	var origin := camera.project_ray_origin(mouse_pos)
-	var dir := camera.project_ray_normal(mouse_pos)
-	var denom := dir.dot(Vector3.UP)
-	if absf(denom) < 0.0001:
-		return null
-	var t := (plane_y - origin.y) / denom
-	if t < 0.0:
-		return null
-	return Vector3(
-		origin.x + dir.x * t,
-		plane_y,
-		origin.z + dir.z * t
-	)
-
-func _snap_float(value: float, step: float) -> float:
-	if step <= 0.000001:
-		return value
-	return round(value / step) * step
-
-func _snap_vector(v: Vector3, step: float) -> Vector3:
-	return Vector3(_snap_float(v.x, step), _snap_float(v.y, step), _snap_float(v.z, step))
-
-func _world_units_per_pixel_at(camera: Camera3D, world_pos: Vector3) -> float:
-	var viewport := camera.get_viewport()
-	if viewport == null:
-		return 0.01
-	var viewport_h := viewport.get_visible_rect().size.y
-	if viewport_h <= 1.0:
-		return 0.01
-	var dist := camera.global_position.distance_to(world_pos)
-	var fov_rad := deg_to_rad(camera.fov)
-	return maxf((2.0 * dist * tan(fov_rad * 0.5)) / viewport_h, 0.0001)
+	if selected_nodes.size() == 1 and selected_nodes[0] == map_node:
+		return
+	selection.clear()
+	selection.add_node(map_node)
 
 func _begin_history_action() -> void:
 	if history_action_active:
@@ -4328,9 +4320,9 @@ func _end_history_action() -> void:
 	if not history_action_active:
 		return
 	var current_state := _capture_map_state()
-	if not _states_equal(pending_undo_state, current_state):
-		var undo_state := _clone_state(pending_undo_state)
-		var do_state := _clone_state(current_state)
+	if not EDITOR_STATE_UTILS_SCRIPT.states_equal(pending_undo_state, current_state):
+		var undo_state := EDITOR_STATE_UTILS_SCRIPT.clone_state(pending_undo_state)
+		var do_state := EDITOR_STATE_UTILS_SCRIPT.clone_state(current_state)
 		var undo_redo := get_undo_redo()
 		undo_redo.create_action("BrushForge Edit")
 		undo_redo.add_do_method(self, "_restore_map_state", do_state)
@@ -4377,16 +4369,19 @@ func _restore_map_state(state: Array) -> void:
 	# On normal edit commit, UndoRedo immediately runs "do" with the current state.
 	# Rebuilding in that case can desync editor refs and make brushes appear to vanish.
 	var current_state := _capture_map_state()
-	if _states_equal(current_state, state):
+	if EDITOR_STATE_UTILS_SCRIPT.states_equal(current_state, state):
 		map_node.sync_data_from_scene()
 		return
 	var previous_selected_index := selected_brush_index
 	var previous_face_index := selected_face_index
+	if _try_restore_map_state_in_place(state, previous_selected_index, previous_face_index):
+		return
 	var brush_meshes := _get_brush_meshes()
 	for mesh in brush_meshes:
 		if mesh != null and mesh.get_parent() == map_node:
 			map_node.remove_child(mesh)
 			mesh.queue_free()
+	_invalidate_brush_mesh_cache()
 	map_node.brush_data.clear()
 
 	for item in state:
@@ -4418,6 +4413,7 @@ func _restore_map_state(state: Array) -> void:
 		mi.position = pos
 		mi.set_meta(EDIT_LOCK_META, true)
 		map_node.add_brush(brush, mi)
+	_invalidate_brush_mesh_cache()
 
 	map_node.sync_data_from_scene()
 	var rebuilt_meshes := _get_brush_meshes()
@@ -4430,92 +4426,117 @@ func _restore_map_state(state: Array) -> void:
 			return
 	_clear_selection()
 
-func _states_equal(a: Array, b: Array) -> bool:
-	if a.size() != b.size():
+func _try_restore_map_state_in_place(state: Array, previous_selected_index: int, previous_face_index: int) -> bool:
+	if map_node == null:
 		return false
-	for i in range(a.size()):
-		var ai = a[i]
-		var bi = b[i]
-		if ai["position"] != bi["position"]:
+	if state.size() != map_node.brush_data.size():
+		return false
+	var meshes := _get_brush_meshes()
+	if meshes.size() < state.size():
+		return false
+	for i in range(state.size()):
+		var brush: BrushForge = map_node.brush_data[i] as BrushForge
+		var mesh := meshes[i]
+		if brush == null or mesh == null:
 			return false
-		if ai["size"] != bi["size"]:
-			return false
-		var ap: Array = ai.get("planes", [])
-		var bp: Array = bi.get("planes", [])
-		if ap.size() != bp.size():
-			return false
-		for j in range(ap.size()):
-			var api = ap[j]
-			var bpi = bp[j]
-			if api.get("normal", Vector3.ZERO) != bpi.get("normal", Vector3.ZERO):
-				return false
-			if float(api.get("distance", 0.0)) != float(bpi.get("distance", 0.0)):
-				return false
-		var afm: Dictionary = ai.get("face_material_paths", {})
-		var bfm: Dictionary = bi.get("face_material_paths", {})
-		if afm != bfm:
-			return false
-		var afuv: Dictionary = ai.get("face_uv_transforms", {})
-		var bfuv: Dictionary = bi.get("face_uv_transforms", {})
-		if afuv != bfuv:
-			return false
-		var afc: Dictionary = ai.get("face_paint_colors", {})
-		var bfc: Dictionary = bi.get("face_paint_colors", {})
-		if afc != bfc:
-			return false
-		var afst: Dictionary = ai.get("face_paint_strokes", {})
-		var bfst: Dictionary = bi.get("face_paint_strokes", {})
-		if afst != bfst:
-			return false
-		var afs: Dictionary = ai.get("face_subdivisions", {})
-		var bfs: Dictionary = bi.get("face_subdivisions", {})
-		if afs != bfs:
-			return false
-		if bool(ai.get("lock_uvs", false)) != bool(bi.get("lock_uvs", false)):
-			return false
+	for i in range(state.size()):
+		var brush: BrushForge = map_node.brush_data[i] as BrushForge
+		var mesh := meshes[i]
+		var item: Dictionary = state[i]
+		var target_position: Vector3 = item.get("position", brush.position)
+		var target_size: Vector3 = item.get("size", brush.size)
+		var target_planes: Array = item.get("planes", [])
+		var target_face_material_paths: Dictionary = item.get("face_material_paths", {})
+		var target_face_uv_transforms: Dictionary = item.get("face_uv_transforms", {})
+		var target_face_paint_colors: Dictionary = item.get("face_paint_colors", {})
+		var target_face_paint_strokes: Dictionary = item.get("face_paint_strokes", {})
+		var target_face_subdivisions: Dictionary = item.get("face_subdivisions", {})
+		var target_lock_uvs := bool(item.get("lock_uvs", false))
+		var geometry_changed := false
+		if brush.size != target_size:
+			geometry_changed = true
+		if brush.planes.size() != target_planes.size():
+			geometry_changed = true
+		else:
+			for p_idx in range(target_planes.size()):
+				var current_plane: NeoPlane = brush.planes[p_idx] as NeoPlane
+				var src: Dictionary = target_planes[p_idx]
+				var n: Vector3 = src.get("normal", Vector3.UP)
+				var d: float = float(src.get("distance", 0.0))
+				if current_plane == null or current_plane.normal != n or absf(current_plane.distance - d) > 0.00001:
+					geometry_changed = true
+					break
+		if brush.face_material_paths != target_face_material_paths:
+			geometry_changed = true
+		if brush.face_uv_transforms != target_face_uv_transforms:
+			geometry_changed = true
+		if brush.face_paint_colors != target_face_paint_colors:
+			geometry_changed = true
+		if brush.face_paint_strokes != target_face_paint_strokes:
+			geometry_changed = true
+		if brush.face_subdivisions != target_face_subdivisions:
+			geometry_changed = true
+		if brush.lock_uvs != target_lock_uvs:
+			geometry_changed = true
+		brush.position = target_position
+		brush.size = target_size
+		brush.planes.clear()
+		for src in target_planes:
+			var n: Vector3 = (src as Dictionary).get("normal", Vector3.UP)
+			var d: float = float((src as Dictionary).get("distance", 0.0))
+			brush.planes.append(NeoPlane.new(n, d))
+		if brush.planes.size() < 4:
+			var rebuilt := BrushForge.create_box(target_position, target_size)
+			brush.planes = rebuilt.planes.duplicate()
+			geometry_changed = true
+		brush.face_material_paths = target_face_material_paths.duplicate(true)
+		brush.face_uv_transforms = target_face_uv_transforms.duplicate(true)
+		brush.face_paint_colors = target_face_paint_colors.duplicate(true)
+		brush.face_paint_strokes = target_face_paint_strokes.duplicate(true)
+		brush.face_subdivisions = target_face_subdivisions.duplicate(true)
+		brush.lock_uvs = target_lock_uvs
+		mesh.position = target_position
+		if geometry_changed:
+			_queue_mesh_rebuild_for_brush(i)
+	_flush_pending_mesh_rebuilds()
+	map_node.sync_data_from_scene()
+	if previous_selected_index >= 0 and previous_selected_index < meshes.size():
+		var selected := meshes[previous_selected_index]
+		if selected != null:
+			_select_brush(selected, previous_selected_index)
+			if previous_face_index >= 0:
+				_select_face(previous_face_index)
+			return true
+	_clear_selection()
 	return true
 
-func _clone_state(state: Array) -> Array:
-	var out: Array = []
-	for item in state:
-		var planes_copy: Array = []
-		var planes_src: Array = item.get("planes", [])
-		for p in planes_src:
-			planes_copy.append({
-				"normal": p.get("normal", Vector3.UP),
-				"distance": float(p.get("distance", 0.0)),
-			})
-		out.append({
-			"position": item["position"],
-			"size": item["size"],
-			"planes": planes_copy,
-			"face_material_paths": item.get("face_material_paths", {}).duplicate(true),
-			"face_uv_transforms": item.get("face_uv_transforms", {}).duplicate(true),
-			"face_paint_colors": item.get("face_paint_colors", {}).duplicate(true),
-			"face_paint_strokes": item.get("face_paint_strokes", {}).duplicate(true),
-			"face_subdivisions": item.get("face_subdivisions", {}).duplicate(true),
-			"lock_uvs": bool(item.get("lock_uvs", false)),
-		})
-	return out
-
 func _ensure_map_node(create_if_missing: bool = true) -> bool:
+	if map_node != null and is_instance_valid(map_node) and map_node.get_tree() != null:
+		return true
 	var root := get_editor_interface().get_edited_scene_root()
 	if root == null:
 		return false
-	var found_maps := root.find_children("*", "BrushForgeMap", true, false)
-	if found_maps.size() > 0:
-		map_node = found_maps[0] as BrushForgeMap
-	else:
-		map_node = root.get_node_or_null("BrushForgeMap")
-	if map_node == null and create_if_missing:
-		map_node = BrushForgeMap.new()
-		map_node.name = "BrushForgeMap"
-		root.add_child(map_node)
-		map_node.owner = root
+	var next_map: BrushForgeMap = null
+	next_map = root.get_node_or_null("BrushForgeMap") as BrushForgeMap
+	if next_map == null:
+		var found_maps := root.find_children("*", "BrushForgeMap", true, false)
+		if found_maps.size() > 0:
+			next_map = found_maps[0] as BrushForgeMap
+	if next_map == null and create_if_missing:
+		next_map = BrushForgeMap.new()
+		next_map.name = "BrushForgeMap"
+		root.add_child(next_map)
+		next_map.owner = root
+	var map_changed := map_node != next_map
+	if map_node != next_map:
+		map_node = next_map
+		_invalidate_brush_mesh_cache()
+		_invalidate_subdivide_face_cache()
 	if map_node == null:
 		return false
-	_lock_all_brush_nodes()
-	_ensure_gizmo_nodes()
+	if map_changed:
+		_lock_all_brush_nodes()
+		_ensure_gizmo_nodes()
 	return true
 
 func _set_plugin_active(active: bool) -> void:
@@ -4584,14 +4605,49 @@ func _set_plugin_active(active: bool) -> void:
 func _update_texture_panel_visibility() -> void:
 	if texture_panel == null:
 		return
-	texture_panel.visible = plugin_active and _is_custom_tool_enabled()
+	var has_bottom_ui_tool := (texture_tool_button != null and texture_tool_button.button_pressed) \
+		or (paint_tool_button != null and paint_tool_button.button_pressed) \
+		or (subdivide_tool_button != null and subdivide_tool_button.button_pressed)
+	var should_show := plugin_active and has_bottom_ui_tool
+	if should_show and not texture_panel_in_bottom:
+		add_control_to_bottom_panel(texture_panel, "BrushForge Materials")
+		texture_panel_in_bottom = true
+	elif not should_show and texture_panel_in_bottom:
+		remove_control_from_bottom_panel(texture_panel)
+		texture_panel_in_bottom = false
+	texture_panel.visible = should_show
+
+func _invalidate_subdivide_face_cache() -> void:
+	subdivide_face_cache_key = ""
+	subdivide_face_cache.clear()
+
+func _invalidate_brush_mesh_cache() -> void:
+	brush_meshes_cache.clear()
+	brush_meshes_cache_owner_id = -1
+	brush_meshes_cache_child_count = -1
 
 func _get_brush_meshes() -> Array[MeshInstance3D]:
+	if map_node == null:
+		var empty: Array[MeshInstance3D] = []
+		return empty
+	var owner_id := map_node.get_instance_id()
+	var child_count := map_node.get_child_count()
+	var cache_valid := owner_id == brush_meshes_cache_owner_id and child_count == brush_meshes_cache_child_count
+	if cache_valid and not brush_meshes_cache.is_empty():
+		for mesh in brush_meshes_cache:
+			if mesh == null or not is_instance_valid(mesh) or mesh.get_parent() != map_node:
+				cache_valid = false
+				break
+	if cache_valid:
+		return brush_meshes_cache
 	var meshes: Array[MeshInstance3D] = []
 	for child in map_node.get_children():
 		if child is MeshInstance3D and not String(child.name).begins_with("__BrushForge"):
 			meshes.append(child as MeshInstance3D)
-	return meshes
+	brush_meshes_cache = meshes
+	brush_meshes_cache_owner_id = owner_id
+	brush_meshes_cache_child_count = child_count
+	return brush_meshes_cache
 
 func _rebuild_all_brush_meshes() -> void:
 	if map_node == null:
@@ -4603,80 +4659,6 @@ func _rebuild_all_brush_meshes() -> void:
 		if mesh == null or brush == null:
 			continue
 		mesh.mesh = _build_brush_mesh(brush)
-
-func _ray_aabb_hit(origin: Vector3, dir: Vector3, min_b: Vector3, max_b: Vector3) -> Dictionary:
-	var tmin := -INF
-	var tmax := INF
-	var enter_face := -1
-
-	var xhit := _ray_axis_interval(origin.x, dir.x, min_b.x, max_b.x, 0)
-	if xhit.is_empty():
-		return {}
-	if float(xhit["near"]) > tmin:
-		tmin = float(xhit["near"])
-		enter_face = int(xhit["face_near"])
-	tmax = minf(tmax, float(xhit["far"]))
-	if tmin > tmax:
-		return {}
-
-	var yhit := _ray_axis_interval(origin.y, dir.y, min_b.y, max_b.y, 1)
-	if yhit.is_empty():
-		return {}
-	if float(yhit["near"]) > tmin:
-		tmin = float(yhit["near"])
-		enter_face = int(yhit["face_near"])
-	tmax = minf(tmax, float(yhit["far"]))
-	if tmin > tmax:
-		return {}
-
-	var zhit := _ray_axis_interval(origin.z, dir.z, min_b.z, max_b.z, 2)
-	if zhit.is_empty():
-		return {}
-	if float(zhit["near"]) > tmin:
-		tmin = float(zhit["near"])
-		enter_face = int(zhit["face_near"])
-	tmax = minf(tmax, float(zhit["far"]))
-	if tmin > tmax:
-		return {}
-
-	if tmax < 0.0:
-		return {}
-	var t_hit := tmin if tmin >= 0.0 else tmax
-	return {
-		"t": t_hit,
-		"face_index": enter_face,
-	}
-
-func _ray_axis_interval(origin: float, dir: float, min_b: float, max_b: float, axis: int) -> Dictionary:
-	if absf(dir) < 0.00001:
-		if origin < min_b or origin > max_b:
-			return {}
-		return {
-			"near": -INF,
-			"far": INF,
-			"face_near": -1,
-		}
-
-	var t1 := (min_b - origin) / dir
-	var t2 := (max_b - origin) / dir
-	var face_near := -1
-	if t1 > t2:
-		var tmp := t1
-		t1 = t2
-		t2 = tmp
-
-	if axis == 0:
-		face_near = 1 if dir > 0.0 else 0
-	elif axis == 1:
-		face_near = 3 if dir > 0.0 else 2
-	else:
-		face_near = 5 if dir > 0.0 else 4
-
-	return {
-		"near": t1,
-		"far": t2,
-		"face_near": face_near,
-	}
 
 func _ensure_gizmo_nodes() -> void:
 	if map_node == null:
@@ -4897,9 +4879,38 @@ func _remove_gizmo_nodes() -> void:
 	clip_line_material = null
 	vertex_all_gizmo_material = null
 	vertex_selected_gizmo_material = null
+	_invalidate_subdivide_face_cache()
 
 func _update_gizmos() -> void:
 	if map_node == null:
+		return
+	if not _is_custom_tool_enabled():
+		if brush_gizmo != null:
+			brush_gizmo.visible = false
+		if group_brush_gizmo != null:
+			group_brush_gizmo.visible = false
+		if face_gizmo != null:
+			face_gizmo.visible = false
+		if edge_gizmo != null:
+			edge_gizmo.visible = false
+		if paint_brush_gizmo != null:
+			paint_brush_gizmo.visible = false
+		if subdivide_outline_gizmo != null:
+			subdivide_outline_gizmo.visible = false
+		if subdivide_grid_gizmo != null:
+			subdivide_grid_gizmo.visible = false
+		if rotate_gizmo != null:
+			rotate_gizmo.visible = false
+		if brush_rect_gizmo != null:
+			brush_rect_gizmo.visible = false
+		if brush_preview_gizmo != null:
+			brush_preview_gizmo.visible = false
+		if clip_line_gizmo != null:
+			clip_line_gizmo.visible = false
+		if vertex_all_gizmo != null:
+			vertex_all_gizmo.visible = false
+		if vertex_selected_gizmo != null:
+			vertex_selected_gizmo.visible = false
 		return
 	_ensure_gizmo_nodes()
 	if brush_gizmo == null or face_gizmo == null or group_brush_gizmo == null:
@@ -4924,10 +4935,10 @@ func _update_gizmos() -> void:
 			vertex_selected_gizmo.visible = false
 		return
 
-	var b := _mesh_bounds_world(selected_mesh)
+	var b := GIZMO_SHAPE_BUILDER_SCRIPT.mesh_bounds_world(selected_mesh)
 	var center: Vector3 = b["center"]
 	var half_size: Vector3 = b["half_size"]
-	brush_gizmo.mesh = _build_wire_box_mesh(center, half_size, red_gizmo_material)
+	brush_gizmo.mesh = GIZMO_MESH_BUILDER_SCRIPT.build_wire_box_mesh(center, half_size, red_gizmo_material)
 	brush_gizmo.visible = true
 	var meshes := _get_brush_meshes()
 	var group_centers: Array[Vector3] = []
@@ -4940,13 +4951,13 @@ func _update_gizmos() -> void:
 		var other := meshes[idx]
 		if other == null:
 			continue
-		var ob := _mesh_bounds_world(other)
+		var ob := GIZMO_SHAPE_BUILDER_SCRIPT.mesh_bounds_world(other)
 		group_centers.append(ob["center"])
 		group_halves.append(ob["half_size"])
 	if group_centers.is_empty():
 		group_brush_gizmo.visible = false
 	else:
-		group_brush_gizmo.mesh = _build_multi_wire_box_mesh(group_centers, group_halves, pink_group_gizmo_material)
+		group_brush_gizmo.mesh = GIZMO_MESH_BUILDER_SCRIPT.build_multi_wire_box_mesh(group_centers, group_halves, pink_group_gizmo_material)
 		group_brush_gizmo.visible = true
 	var active_face_material: Material = yellow_gizmo_material
 	if face_drag_active and face_drag_ctrl_mode:
@@ -4962,7 +4973,7 @@ func _update_gizmos() -> void:
 			var brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
 			if brush != null:
 				var selected_vertices := _get_selected_vertices_world(brush)
-				face_gizmo.mesh = _build_polygon_wire_mesh(selected_vertices, active_face_material)
+				face_gizmo.mesh = GIZMO_SHAPE_BUILDER_SCRIPT.build_polygon_wire_mesh(selected_vertices, active_face_material)
 				face_gizmo.visible = selected_vertices.size() >= 3
 			else:
 				face_gizmo.mesh = _build_face_wire_mesh(center, half_size, face_idx, active_face_material)
@@ -4992,7 +5003,7 @@ func _update_clip_tool_gizmo() -> void:
 		pts.append(p)
 	if clip_points.size() == 3:
 		pts.append(clip_points[0])
-	clip_line_gizmo.mesh = _build_polyline_mesh(pts, clip_line_material)
+	clip_line_gizmo.mesh = GIZMO_MESH_BUILDER_SCRIPT.build_polyline_mesh(pts, clip_line_material)
 	clip_line_gizmo.visible = true
 
 func _update_brush_tool_gizmos() -> void:
@@ -5008,7 +5019,7 @@ func _update_brush_tool_gizmos() -> void:
 	var p10 := brush_draw_plane_origin + brush_draw_axis_u * brush_draw_max_u + brush_draw_axis_v * brush_draw_min_v
 	var p11 := brush_draw_plane_origin + brush_draw_axis_u * brush_draw_max_u + brush_draw_axis_v * brush_draw_max_v
 	var p01 := brush_draw_plane_origin + brush_draw_axis_u * brush_draw_min_u + brush_draw_axis_v * brush_draw_max_v
-	brush_rect_gizmo.mesh = _build_polyline_mesh([p00, p10, p11, p01, p00], cyan_gizmo_material)
+	brush_rect_gizmo.mesh = GIZMO_MESH_BUILDER_SCRIPT.build_polyline_mesh([p00, p10, p11, p01, p00], cyan_gizmo_material)
 	brush_rect_gizmo.visible = true
 
 	var box := _build_brush_tool_box()
@@ -5041,11 +5052,11 @@ func _update_edge_tool_gizmo(center: Vector3, half_size: Vector3) -> void:
 		edge_gizmo.visible = false
 		return
 	var edges := _build_candidate_edges(brush, vertices)
-	edge_gizmo.mesh = _build_edges_wire_mesh(vertices, edges, edge_gizmo_material)
+	edge_gizmo.mesh = GIZMO_SHAPE_BUILDER_SCRIPT.build_edges_wire_mesh(vertices, edges, edge_gizmo_material)
 	edge_gizmo.visible = true
 	if selected_vertex_indices.size() == 2:
 		var sv_edges := [{"a": selected_vertex_indices[0], "b": selected_vertex_indices[1]}]
-		face_gizmo.mesh = _build_edges_wire_mesh(vertices, sv_edges, yellow_gizmo_material)
+		face_gizmo.mesh = GIZMO_SHAPE_BUILDER_SCRIPT.build_edges_wire_mesh(vertices, sv_edges, yellow_gizmo_material)
 		face_gizmo.visible = true
 
 func _update_paint_brush_gizmo() -> void:
@@ -5059,8 +5070,22 @@ func _update_paint_brush_gizmo() -> void:
 		paint_brush_gizmo.visible = false
 		return
 	var radius := float(paint_radius_spinbox.value) if paint_radius_spinbox != null else 1.0
-	paint_brush_gizmo.mesh = _build_wire_sphere_mesh(paint_hover_point, maxf(radius, 0.01), paint_brush_gizmo_material)
+	paint_brush_gizmo.mesh = GIZMO_MESH_BUILDER_SCRIPT.build_wire_sphere_mesh(paint_hover_point, maxf(radius, 0.01), paint_brush_gizmo_material)
 	paint_brush_gizmo.visible = true
+
+func _get_subdivide_face_corners_cached() -> Array[Vector3]:
+	if map_node == null or selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size() or selected_face_index < 0:
+		var empty: Array[Vector3] = []
+		return empty
+	var mesh_id := -1
+	if selected_mesh != null and selected_mesh.mesh != null:
+		mesh_id = selected_mesh.mesh.get_instance_id()
+	var key := "%s|%s|%s" % [selected_brush_index, selected_face_index, mesh_id]
+	if key == subdivide_face_cache_key and not subdivide_face_cache.is_empty():
+		return subdivide_face_cache
+	subdivide_face_cache_key = key
+	subdivide_face_cache = _get_selected_brush_face_corners(selected_face_index)
+	return subdivide_face_cache
 
 func _update_subdivide_tool_gizmo(center: Vector3, half_size: Vector3) -> void:
 	_ensure_gizmo_nodes()
@@ -5074,7 +5099,7 @@ func _update_subdivide_tool_gizmo(center: Vector3, half_size: Vector3) -> void:
 		subdivide_outline_gizmo.visible = false
 		subdivide_grid_gizmo.visible = false
 		return
-	var face_corners := _get_selected_brush_face_corners(selected_face_index)
+	var face_corners := _get_subdivide_face_corners_cached()
 	if face_corners.size() < 3:
 		subdivide_outline_gizmo.visible = false
 		subdivide_grid_gizmo.visible = false
@@ -5083,7 +5108,7 @@ func _update_subdivide_tool_gizmo(center: Vector3, half_size: Vector3) -> void:
 	for p in face_corners:
 		outline_pts.append(p)
 	outline_pts.append(face_corners[0])
-	subdivide_outline_gizmo.mesh = _build_polyline_mesh(outline_pts, subdivide_outline_material)
+	subdivide_outline_gizmo.mesh = GIZMO_MESH_BUILDER_SCRIPT.build_polyline_mesh(outline_pts, subdivide_outline_material)
 	subdivide_outline_gizmo.visible = true
 	var sx := 1
 	var sy := 1
@@ -5098,7 +5123,7 @@ func _update_subdivide_tool_gizmo(center: Vector3, half_size: Vector3) -> void:
 	if sx <= 1 and sy <= 1:
 		subdivide_grid_gizmo.visible = false
 		return
-	subdivide_grid_gizmo.mesh = _build_face_grid_mesh(face_corners, sx, sy, subdivide_grid_material)
+	subdivide_grid_gizmo.mesh = GIZMO_MESH_BUILDER_SCRIPT.build_face_grid_mesh(face_corners, sx, sy, subdivide_grid_material)
 	subdivide_grid_gizmo.visible = true
 
 func _update_rotate_tool_gizmo(center: Vector3, half_size: Vector3) -> void:
@@ -5110,7 +5135,15 @@ func _update_rotate_tool_gizmo(center: Vector3, half_size: Vector3) -> void:
 		return
 	var radius := maxf(maxf(half_size.x, half_size.y), half_size.z) * 1.25
 	var active_axis := rotate_drag_axis if rotate_drag_active else Vector3.ZERO
-	rotate_gizmo.mesh = _build_rotate_rings_mesh(center, maxf(radius, grid_size), active_axis)
+	rotate_gizmo.mesh = GIZMO_SHAPE_BUILDER_SCRIPT.build_rotate_rings_mesh(
+		center,
+		maxf(radius, grid_size),
+		active_axis,
+		rotate_x_material,
+		rotate_y_material,
+		rotate_z_material,
+		rotate_active_material
+	)
 	rotate_gizmo.visible = true
 
 func _update_vertex_tool_gizmo() -> void:
@@ -5135,7 +5168,7 @@ func _update_vertex_tool_gizmo() -> void:
 		vertex_all_gizmo.visible = false
 		vertex_selected_gizmo.visible = false
 		return
-	vertex_all_gizmo.mesh = _build_vertex_markers_mesh(vertices, grid_size * 0.14, vertex_all_gizmo_material)
+	vertex_all_gizmo.mesh = GIZMO_SHAPE_BUILDER_SCRIPT.build_vertex_markers_mesh(vertices, grid_size * 0.14, vertex_all_gizmo_material)
 	vertex_all_gizmo.visible = true
 	var selected_vertices: Array[Vector3] = []
 	for idx in selected_vertex_indices:
@@ -5144,393 +5177,31 @@ func _update_vertex_tool_gizmo() -> void:
 	if selected_vertices.is_empty():
 		vertex_selected_gizmo.visible = false
 	else:
-		vertex_selected_gizmo.mesh = _build_vertex_markers_mesh(selected_vertices, grid_size * 0.22, vertex_selected_gizmo_material)
+		vertex_selected_gizmo.mesh = GIZMO_SHAPE_BUILDER_SCRIPT.build_vertex_markers_mesh(selected_vertices, grid_size * 0.22, vertex_selected_gizmo_material)
 		vertex_selected_gizmo.visible = true
-
-func _build_vertex_markers_mesh(points: Array[Vector3], half_extent: float, material: Material) -> ArrayMesh:
-	var verts := PackedVector3Array()
-	var h := Vector3.ONE * maxf(half_extent, 0.01)
-	for p in points:
-		var c := [
-			p + Vector3(-h.x, -h.y, -h.z),
-			p + Vector3(h.x, -h.y, -h.z),
-			p + Vector3(h.x, h.y, -h.z),
-			p + Vector3(-h.x, h.y, -h.z),
-			p + Vector3(-h.x, -h.y, h.z),
-			p + Vector3(h.x, -h.y, h.z),
-			p + Vector3(h.x, h.y, h.z),
-			p + Vector3(-h.x, h.y, h.z),
-		]
-		var edges := PackedInt32Array([
-			0, 1, 1, 2, 2, 3, 3, 0,
-			4, 5, 5, 6, 6, 7, 7, 4,
-			0, 4, 1, 5, 2, 6, 3, 7,
-		])
-		for ei in edges:
-			verts.append(c[ei])
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _build_rotate_axes_mesh(center: Vector3, radius: float, material: Material) -> ArrayMesh:
-	var verts := PackedVector3Array([
-		center + Vector3.LEFT * radius, center + Vector3.RIGHT * radius,
-		center + Vector3.DOWN * radius, center + Vector3.UP * radius,
-		center + Vector3.FORWARD * radius, center + Vector3.BACK * radius,
-	])
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _build_rotate_rings_mesh(center: Vector3, radius: float, active_axis: Vector3 = Vector3.ZERO) -> ArrayMesh:
-	var mesh := ArrayMesh.new()
-	var ring_defs := [
-		{"axis": Vector3.RIGHT, "material": rotate_x_material},
-		{"axis": Vector3.UP, "material": rotate_y_material},
-		{"axis": Vector3.BACK, "material": rotate_z_material},
-	]
-	for ring in ring_defs:
-		var verts := PackedVector3Array()
-		var axis: Vector3 = ring["axis"]
-		var material: Material = ring["material"]
-		if active_axis.length() > 0.0 and axis.dot(active_axis.normalized()) > 0.99:
-			material = rotate_active_material
-		_append_ring_segments(verts, center, axis, radius, 48)
-		var arr := []
-		arr.resize(Mesh.ARRAY_MAX)
-		arr[Mesh.ARRAY_VERTEX] = verts
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-		var surface_idx := mesh.get_surface_count() - 1
-		mesh.surface_set_material(surface_idx, material)
-	return mesh
-
-func _append_ring_segments(verts: PackedVector3Array, center: Vector3, normal: Vector3, radius: float, segments: int) -> void:
-	var tangent := Vector3.RIGHT
-	if absf(normal.dot(tangent)) > 0.95:
-		tangent = Vector3.UP
-	tangent = (tangent - normal * tangent.dot(normal)).normalized()
-	var bitangent := normal.cross(tangent).normalized()
-	for i in range(segments):
-		var a0 := TAU * float(i) / float(segments)
-		var a1 := TAU * float(i + 1) / float(segments)
-		var p0 := center + (tangent * cos(a0) + bitangent * sin(a0)) * radius
-		var p1 := center + (tangent * cos(a1) + bitangent * sin(a1)) * radius
-		verts.append(p0)
-		verts.append(p1)
-
-func _build_edges_wire_mesh(vertices: Array[Vector3], edges: Array, material: Material) -> ArrayMesh:
-	var verts := PackedVector3Array()
-	for e in edges:
-		var ai := int(e.get("a", -1))
-		var bi := int(e.get("b", -1))
-		if ai < 0 or bi < 0 or ai >= vertices.size() or bi >= vertices.size():
-			continue
-		verts.append(vertices[ai])
-		verts.append(vertices[bi])
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _build_polygon_wire_mesh(points: Array[Vector3], material: Material) -> ArrayMesh:
-	if points.size() < 3:
-		return ArrayMesh.new()
-	var center := Vector3.ZERO
-	for p in points:
-		center += p
-	center /= float(points.size())
-	var normal := Vector3.ZERO
-	for i in range(points.size()):
-		var a := points[i] - center
-		var b := points[(i + 1) % points.size()] - center
-		normal += a.cross(b)
-	if normal.length() < 0.0001:
-		normal = Vector3.UP
-	else:
-		normal = normal.normalized()
-	var tangent := Vector3.RIGHT
-	if absf(normal.dot(tangent)) > 0.95:
-		tangent = Vector3.UP
-	tangent = (tangent - normal * tangent.dot(normal)).normalized()
-	var bitangent := normal.cross(tangent).normalized()
-	var ordered := []
-	for p in points:
-		var d := p - center
-		var ang := atan2(d.dot(bitangent), d.dot(tangent))
-		ordered.append({"a": ang, "p": p})
-	ordered.sort_custom(func(x, y): return x["a"] < y["a"])
-	var verts := PackedVector3Array()
-	for i in range(ordered.size()):
-		var p0: Vector3 = ordered[i]["p"]
-		var p1: Vector3 = ordered[(i + 1) % ordered.size()]["p"]
-		verts.append(p0)
-		verts.append(p1)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _build_polyline_mesh(points: Array, material: Material) -> ArrayMesh:
-	var verts := PackedVector3Array()
-	for p in points:
-		verts.append(p)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINE_STRIP, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _build_wire_sphere_mesh(center: Vector3, radius: float, material: Material) -> ArrayMesh:
-	var verts := PackedVector3Array()
-	var steps := 32
-	for i in range(steps):
-		var a0 := TAU * float(i) / float(steps)
-		var a1 := TAU * float(i + 1) / float(steps)
-		verts.append(center + Vector3(cos(a0), sin(a0), 0.0) * radius)
-		verts.append(center + Vector3(cos(a1), sin(a1), 0.0) * radius)
-		verts.append(center + Vector3(cos(a0), 0.0, sin(a0)) * radius)
-		verts.append(center + Vector3(cos(a1), 0.0, sin(a1)) * radius)
-		verts.append(center + Vector3(0.0, cos(a0), sin(a0)) * radius)
-		verts.append(center + Vector3(0.0, cos(a1), sin(a1)) * radius)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _mesh_bounds_world(mesh: MeshInstance3D) -> Dictionary:
-	if mesh == null or mesh.mesh == null:
-		var c := mesh.global_position if mesh != null else Vector3.ZERO
-		return {"min": c, "max": c, "center": c, "half_size": Vector3.ONE * 0.5}
-	var aabb := mesh.mesh.get_aabb()
-	var minp := mesh.global_position + aabb.position
-	var maxp := minp + aabb.size
-	var center := (minp + maxp) * 0.5
-	var half := (maxp - minp) * 0.5
-	return {"min": minp, "max": maxp, "center": center, "half_size": half}
-
-func _build_wire_box_mesh(center: Vector3, half_size: Vector3, material: Material) -> ArrayMesh:
-	var verts := PackedVector3Array()
-	_append_wire_box_edges(verts, center, half_size)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _build_multi_wire_box_mesh(centers: Array[Vector3], half_sizes: Array[Vector3], material: Material) -> ArrayMesh:
-	var verts := PackedVector3Array()
-	var count := mini(centers.size(), half_sizes.size())
-	for i in range(count):
-		_append_wire_box_edges(verts, centers[i], half_sizes[i])
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _append_wire_box_edges(verts: PackedVector3Array, center: Vector3, half_size: Vector3) -> void:
-	var c := [
-		center + Vector3(-half_size.x, -half_size.y, -half_size.z),
-		center + Vector3(half_size.x, -half_size.y, -half_size.z),
-		center + Vector3(half_size.x, half_size.y, -half_size.z),
-		center + Vector3(-half_size.x, half_size.y, -half_size.z),
-		center + Vector3(-half_size.x, -half_size.y, half_size.z),
-		center + Vector3(half_size.x, -half_size.y, half_size.z),
-		center + Vector3(half_size.x, half_size.y, half_size.z),
-		center + Vector3(-half_size.x, half_size.y, half_size.z),
-	]
-	var edges := PackedInt32Array([
-		0, 1, 1, 2, 2, 3, 3, 0,
-		4, 5, 5, 6, 6, 7, 7, 4,
-		0, 4, 1, 5, 2, 6, 3, 7,
-	])
-	for i in edges:
-		verts.append(c[i])
 
 func _build_face_wire_mesh(center: Vector3, half_size: Vector3, face_index: int, material: Material) -> ArrayMesh:
 	var corners := _get_selected_brush_face_corners(face_index)
 	if corners.size() < 3:
-		corners = _get_face_corners(center, half_size, face_index)
-	if corners.size() < 3:
-		return ArrayMesh.new()
-	var verts := PackedVector3Array()
-	for i in range(corners.size()):
-		var p0: Vector3 = corners[i]
-		var p1: Vector3 = corners[(i + 1) % corners.size()]
-		verts.append(p0)
-		verts.append(p1)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
+		corners = GIZMO_SHAPE_BUILDER_SCRIPT.get_box_face_corners(center, half_size, face_index)
+	return GIZMO_SHAPE_BUILDER_SCRIPT.build_face_wire_mesh_from_corners(corners, material)
 
-func _build_face_grid_mesh(corners: Array[Vector3], subdiv_x: int, subdiv_y: int, material: Material) -> ArrayMesh:
-	if corners.size() < 3:
-		return ArrayMesh.new()
-	var verts := PackedVector3Array()
-	var sx := max(1, subdiv_x)
-	var sy := max(1, subdiv_y)
-	if sx <= 1 and sy <= 1:
-		return ArrayMesh.new()
-	var origin: Vector3 = corners[0]
-	var normal := Vector3.ZERO
-	for i in range(corners.size()):
-		var p0: Vector3 = corners[i]
-		var p1: Vector3 = corners[(i + 1) % corners.size()]
-		normal += p0.cross(p1)
-	if normal.length_squared() <= 0.0000001:
-		normal = (corners[1] - corners[0]).cross(corners[2] - corners[0])
-	if normal.length_squared() <= 0.0000001:
-		return ArrayMesh.new()
-	normal = normal.normalized()
-	var tangent := Vector3.RIGHT
-	if absf(normal.dot(tangent)) > 0.95:
-		tangent = Vector3.UP
-	tangent = (tangent - normal * tangent.dot(normal)).normalized()
-	var bitangent := normal.cross(tangent).normalized()
-	var poly_uv: Array[Vector2] = []
-	for p in corners:
-		poly_uv.append(Vector2((p - origin).dot(tangent), (p - origin).dot(bitangent)))
-	if _polygon_area_signed_2d(poly_uv) < 0.0:
-		poly_uv.reverse()
-	var bounds := _polygon_bounds_2d(poly_uv)
-	var min_u := float(bounds["min_u"])
-	var max_u := float(bounds["max_u"])
-	var min_v := float(bounds["min_v"])
-	var max_v := float(bounds["max_v"])
-	var du := max_u - min_u
-	var dv := max_v - min_v
-	if du <= 0.000001 or dv <= 0.000001:
-		return ArrayMesh.new()
-	for ix in range(sx):
-		var u0 := min_u + du * float(ix) / float(sx)
-		var u1 := min_u + du * float(ix + 1) / float(sx)
-		for iy in range(sy):
-			var v0 := min_v + dv * float(iy) / float(sy)
-			var v1 := min_v + dv * float(iy + 1) / float(sy)
-			var rect: Array[Vector2] = [
-				Vector2(u0, v0),
-				Vector2(u1, v0),
-				Vector2(u1, v1),
-				Vector2(u0, v1),
-			]
-			var clipped := _clip_polygon_convex_2d(rect, poly_uv)
-			if clipped.size() < 3:
-				continue
-			for i in range(clipped.size()):
-				var a2: Vector2 = clipped[i]
-				var b2: Vector2 = clipped[(i + 1) % clipped.size()]
-				var a3 := origin + tangent * a2.x + bitangent * a2.y
-				var b3 := origin + tangent * b2.x + bitangent * b2.y
-				_append_line_segment(verts, a3, b3)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	mesh.surface_set_material(0, material)
-	return mesh
-
-func _polygon_bounds_2d(poly: Array[Vector2]) -> Dictionary:
-	var min_u := INF
-	var min_v := INF
-	var max_u := -INF
-	var max_v := -INF
-	for p in poly:
-		min_u = minf(min_u, p.x)
-		min_v = minf(min_v, p.y)
-		max_u = maxf(max_u, p.x)
-		max_v = maxf(max_v, p.y)
-	return {"min_u": min_u, "min_v": min_v, "max_u": max_u, "max_v": max_v}
-
-func _polygon_area_signed_2d(poly: Array[Vector2]) -> float:
-	if poly.size() < 3:
-		return 0.0
-	var acc := 0.0
-	for i in range(poly.size()):
-		var a: Vector2 = poly[i]
-		var b: Vector2 = poly[(i + 1) % poly.size()]
-		acc += a.x * b.y - a.y * b.x
-	return acc * 0.5
-
-func _clip_polygon_convex_2d(subject: Array[Vector2], clipper: Array[Vector2]) -> Array[Vector2]:
-	var output := subject.duplicate()
-	if output.size() < 3 or clipper.size() < 3:
-		var empty: Array[Vector2] = []
-		return empty
-	for i in range(clipper.size()):
-		var cp1: Vector2 = clipper[i]
-		var cp2: Vector2 = clipper[(i + 1) % clipper.size()]
-		var input := output.duplicate()
-		output.clear()
-		if input.is_empty():
-			break
-		var s: Vector2 = input[input.size() - 1]
-		for e in input:
-			var e_inside := _is_inside_half_plane_2d(cp1, cp2, e)
-			var s_inside := _is_inside_half_plane_2d(cp1, cp2, s)
-			if e_inside:
-				if not s_inside:
-					output.append(_line_intersection_2d(cp1, cp2, s, e))
-				output.append(e)
-			elif s_inside:
-				output.append(_line_intersection_2d(cp1, cp2, s, e))
-			s = e
-	return _dedupe_polygon_points_2d(output)
-
-func _is_inside_half_plane_2d(a: Vector2, b: Vector2, p: Vector2) -> bool:
-	return _cross_2d_vec2(b - a, p - a) >= -0.00001
-
-func _line_intersection_2d(a: Vector2, b: Vector2, p: Vector2, q: Vector2) -> Vector2:
-	var r := b - a
-	var s := q - p
-	var denom := _cross_2d_vec2(r, s)
-	if absf(denom) < 0.0000001:
-		return q
-	var t := _cross_2d_vec2(p - a, s) / denom
-	return a + r * t
-
-func _cross_2d_vec2(a: Vector2, b: Vector2) -> float:
-	return a.x * b.y - a.y * b.x
-
-func _dedupe_polygon_points_2d(poly: Array[Vector2]) -> Array[Vector2]:
-	var out: Array[Vector2] = []
-	for p in poly:
-		if out.is_empty() or out[out.size() - 1].distance_to(p) > 0.00001:
-			out.append(p)
-	if out.size() >= 2 and out[0].distance_to(out[out.size() - 1]) <= 0.00001:
-		out.remove_at(out.size() - 1)
+func _get_selected_mesh_vertices_world() -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	if selected_mesh == null or not is_instance_valid(selected_mesh):
+		return out
+	var mesh_res := selected_mesh.mesh
+	if mesh_res == null:
+		return out
+	var xf: Transform3D = selected_mesh.global_transform
+	for s in range(mesh_res.get_surface_count()):
+		var arrays := mesh_res.surface_get_arrays(s)
+		if arrays.is_empty():
+			continue
+		var src: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		for v in src:
+			out.append(xf * v)
 	return out
-
-func _append_line_segment(verts: PackedVector3Array, a: Vector3, b: Vector3) -> void:
-	verts.append(a)
-	verts.append(b)
 
 func _get_selected_brush_face_corners(face_index: int) -> Array[Vector3]:
 	var out: Array[Vector3] = []
@@ -5542,80 +5213,9 @@ func _get_selected_brush_face_corners(face_index: int) -> Array[Vector3]:
 	var plane: NeoPlane = brush.planes[face_index] as NeoPlane
 	if plane == null:
 		return out
-	var vertices := _get_brush_vertices_world(brush)
+	var vertices := _get_selected_mesh_vertices_world()
+	if vertices.is_empty():
+		vertices = _get_brush_vertices_world(brush)
 	if vertices.is_empty():
 		return out
-	var face_vertices: Array[Vector3] = []
-	for v in vertices:
-		if absf(plane.normal.dot(v) - plane.distance) <= 0.02:
-			face_vertices.append(v)
-	if face_vertices.size() < 3:
-		return out
-	var center := Vector3.ZERO
-	for v in face_vertices:
-		center += v
-	center /= float(face_vertices.size())
-	var tangent := Vector3.RIGHT
-	if absf(plane.normal.dot(tangent)) > 0.95:
-		tangent = Vector3.UP
-	tangent = (tangent - plane.normal * tangent.dot(plane.normal)).normalized()
-	var bitangent := plane.normal.cross(tangent).normalized()
-	var ordered := []
-	for v in face_vertices:
-		var d := v - center
-		var ang := atan2(d.dot(bitangent), d.dot(tangent))
-		ordered.append({"a": ang, "v": v})
-	ordered.sort_custom(func(x, y): return x["a"] < y["a"])
-	for item in ordered:
-		out.append(item["v"])
-	return out
-
-func _get_face_corners(center: Vector3, half_size: Vector3, face_index: int) -> Array[Vector3]:
-	var hx := half_size.x
-	var hy := half_size.y
-	var hz := half_size.z
-	match face_index:
-		0:
-			return [
-				center + Vector3(hx, -hy, -hz),
-				center + Vector3(hx, hy, -hz),
-				center + Vector3(hx, hy, hz),
-				center + Vector3(hx, -hy, hz),
-			]
-		1:
-			return [
-				center + Vector3(-hx, -hy, hz),
-				center + Vector3(-hx, hy, hz),
-				center + Vector3(-hx, hy, -hz),
-				center + Vector3(-hx, -hy, -hz),
-			]
-		2:
-			return [
-				center + Vector3(-hx, hy, -hz),
-				center + Vector3(hx, hy, -hz),
-				center + Vector3(hx, hy, hz),
-				center + Vector3(-hx, hy, hz),
-			]
-		3:
-			return [
-				center + Vector3(-hx, -hy, hz),
-				center + Vector3(hx, -hy, hz),
-				center + Vector3(hx, -hy, -hz),
-				center + Vector3(-hx, -hy, -hz),
-			]
-		4:
-			return [
-				center + Vector3(-hx, -hy, hz),
-				center + Vector3(-hx, hy, hz),
-				center + Vector3(hx, hy, hz),
-				center + Vector3(hx, -hy, hz),
-			]
-		5:
-			return [
-				center + Vector3(hx, -hy, -hz),
-				center + Vector3(hx, hy, -hz),
-				center + Vector3(-hx, hy, -hz),
-				center + Vector3(-hx, -hy, -hz),
-			]
-	var empty: Array[Vector3] = []
-	return empty
+	return GIZMO_SHAPE_BUILDER_SCRIPT.compute_brush_face_hull(vertices, plane.normal, plane.distance, 0.02)
