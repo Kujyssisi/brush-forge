@@ -69,31 +69,17 @@ static func build_brush_mesh(brush: BrushForge) -> ArrayMesh:
 		var face_uv: Dictionary = brush.face_uv_transforms.get(str(face_index), {})
 		if face_uv.is_empty():
 			face_uv = brush.face_uv_transforms.get(str(_face_index_from_normal(plane.normal)), {})
-		var subdiv := int(brush.face_subdivisions.get(str(face_index), 1))
-		subdiv = clampi(subdiv, 1, 10)
+		var subdiv_xy := _face_subdivision_xy(brush, face_index)
+		var subdiv_x := int(subdiv_xy.get("x", 1))
+		var subdiv_y := int(subdiv_xy.get("y", 1))
 		var paint_accel := _build_paint_stroke_accel(face_strokes)
 		var ordered := _sort_face_vertices(face, plane.normal)
-		for i in range(1, ordered.size() - 1):
-			var a: Vector3 = ordered[0]
-			var b: Vector3 = ordered[i]
-			var c: Vector3 = ordered[i + 1]
-			var tri_n := (b - a).cross(c - a).normalized()
-			if tri_n.dot(plane.normal) < 0.0:
-				var tmp := b
-				b = c
-				c = tmp
-				tri_n = (b - a).cross(c - a).normalized()
-			if tri_n.dot(a - brush_center) < 0.0:
-				var tmp2 := b
-				b = c
-				c = tmp2
-				tri_n = (b - a).cross(c - a).normalized()
-			_emit_subdivided_triangle(
-				a, b, c, subdiv, tri_n,
-				brush, face_index, face_color, local_origin,
-				u_axis, v_axis, face_uv, paint_accel,
-				g_verts, g_normals, g_uvs, g_colors
-			)
+		_emit_face_grid_tessellation(
+			ordered, plane.normal, subdiv_x, subdiv_y,
+			brush, face_index, face_color, local_origin,
+			u_axis, v_axis, face_uv, paint_accel,
+			g_verts, g_normals, g_uvs, g_colors
+		)
 		if g_verts.size() >= 3:
 			face_surfaces.append({
 				"verts": g_verts,
@@ -244,6 +230,20 @@ static func _uv_basis_from_normal(normal: Vector3) -> Dictionary:
 	var bitangent := n.cross(tangent).normalized()
 	return {"u": tangent, "v": bitangent}
 
+static func _face_subdivision_xy(brush: BrushForge, face_index: int) -> Dictionary:
+	var out := {"x": 1, "y": 1}
+	if brush == null:
+		return out
+	var raw = brush.face_subdivisions.get(str(face_index), 1)
+	if raw is Dictionary:
+		out["x"] = clampi(int((raw as Dictionary).get("x", 1)), 1, 10)
+		out["y"] = clampi(int((raw as Dictionary).get("y", out["x"])), 1, 10)
+	else:
+		var amount := clampi(int(raw), 1, 10)
+		out["x"] = amount
+		out["y"] = amount
+	return out
+
 static func _compute_uv(p_world: Vector3, brush: BrushForge, u_axis: Vector3, v_axis: Vector3, face_uv: Dictionary) -> Vector2:
 	var p := p_world
 	# Default is global/world UVs; lock switches to object-space UVs.
@@ -262,31 +262,171 @@ static func _compute_uv(p_world: Vector3, brush: BrushForge, u_axis: Vector3, v_
 	uv = Vector2(uv.x / sx, uv.y / sy) + offset
 	return uv
 
-static func _emit_subdivided_triangle(
-	a: Vector3, b: Vector3, c: Vector3, subdiv: int, tri_n: Vector3,
+static func _emit_face_grid_tessellation(
+	ordered: Array[Vector3], plane_normal: Vector3, subdiv_x: int, subdiv_y: int,
 	brush: BrushForge, face_index: int, base_color: Color, local_origin: Vector3,
 	u_axis: Vector3, v_axis: Vector3, face_uv: Dictionary, paint_accel: Dictionary,
 	g_verts: PackedVector3Array, g_normals: PackedVector3Array, g_uvs: PackedVector2Array, g_colors: PackedColorArray
 ) -> void:
-	if subdiv <= 1:
+	if ordered.size() < 3:
+		return
+	var tri_n := plane_normal.normalized()
+	var sx := max(1, subdiv_x)
+	var sy := max(1, subdiv_y)
+	if sx <= 1 and sy <= 1:
+		for i in range(1, ordered.size() - 1):
+			_emit_triangle(ordered[0], ordered[i], ordered[i + 1], tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
+		return
+	var origin := ordered[0]
+	var poly_uv: Array[Vector2] = []
+	for p in ordered:
+		poly_uv.append(Vector2((p - origin).dot(u_axis), (p - origin).dot(v_axis)))
+	if _polygon_area_signed_2d(poly_uv) < 0.0:
+		poly_uv.reverse()
+	var bounds := _polygon_bounds_2d(poly_uv)
+	var min_u := float(bounds["min_u"])
+	var max_u := float(bounds["max_u"])
+	var min_v := float(bounds["min_v"])
+	var max_v := float(bounds["max_v"])
+	var du := max_u - min_u
+	var dv := max_v - min_v
+	if du <= 0.000001 or dv <= 0.000001:
+		for i in range(1, ordered.size() - 1):
+			_emit_triangle(ordered[0], ordered[i], ordered[i + 1], tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
+		return
+	for ix in range(sx):
+		var u0 := min_u + du * float(ix) / float(sx)
+		var u1 := min_u + du * float(ix + 1) / float(sx)
+		for iy in range(sy):
+			var v0 := min_v + dv * float(iy) / float(sy)
+			var v1 := min_v + dv * float(iy + 1) / float(sy)
+			var rect: Array[Vector2] = [
+				Vector2(u0, v0),
+				Vector2(u1, v0),
+				Vector2(u1, v1),
+				Vector2(u0, v1),
+			]
+			var clipped := _clip_polygon_convex_2d(rect, poly_uv)
+			if clipped.size() < 3:
+				continue
+			for i in range(1, clipped.size() - 1):
+				var p0 := origin + u_axis * clipped[0].x + v_axis * clipped[0].y
+				var p1 := origin + u_axis * clipped[i].x + v_axis * clipped[i].y
+				var p2 := origin + u_axis * clipped[i + 1].x + v_axis * clipped[i + 1].y
+				_emit_triangle(p0, p1, p2, tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
+
+static func _polygon_bounds_2d(poly: Array[Vector2]) -> Dictionary:
+	var min_u := INF
+	var min_v := INF
+	var max_u := -INF
+	var max_v := -INF
+	for p in poly:
+		min_u = minf(min_u, p.x)
+		min_v = minf(min_v, p.y)
+		max_u = maxf(max_u, p.x)
+		max_v = maxf(max_v, p.y)
+	return {"min_u": min_u, "min_v": min_v, "max_u": max_u, "max_v": max_v}
+
+static func _polygon_area_signed_2d(poly: Array[Vector2]) -> float:
+	if poly.size() < 3:
+		return 0.0
+	var acc := 0.0
+	for i in range(poly.size()):
+		var a: Vector2 = poly[i]
+		var b: Vector2 = poly[(i + 1) % poly.size()]
+		acc += a.x * b.y - a.y * b.x
+	return acc * 0.5
+
+static func _clip_polygon_convex_2d(subject: Array[Vector2], clipper: Array[Vector2]) -> Array[Vector2]:
+	var output := subject.duplicate()
+	if output.size() < 3 or clipper.size() < 3:
+		var empty: Array[Vector2] = []
+		return empty
+	for i in range(clipper.size()):
+		var cp1: Vector2 = clipper[i]
+		var cp2: Vector2 = clipper[(i + 1) % clipper.size()]
+		var input := output.duplicate()
+		output.clear()
+		if input.is_empty():
+			break
+		var s: Vector2 = input[input.size() - 1]
+		for e in input:
+			var e_inside := _is_inside_half_plane(cp1, cp2, e)
+			var s_inside := _is_inside_half_plane(cp1, cp2, s)
+			if e_inside:
+				if not s_inside:
+					output.append(_line_intersection_2d(s, e, cp1, cp2))
+				output.append(e)
+			elif s_inside:
+				output.append(_line_intersection_2d(s, e, cp1, cp2))
+			s = e
+	output = _dedupe_polygon_points_2d(output)
+	return output
+
+static func _is_inside_half_plane(a: Vector2, b: Vector2, p: Vector2) -> bool:
+	return _cross_2d(b - a, p - a) >= -0.00001
+
+static func _line_intersection_2d(p1: Vector2, p2: Vector2, q1: Vector2, q2: Vector2) -> Vector2:
+	var r := p2 - p1
+	var s := q2 - q1
+	var denom := _cross_2d(r, s)
+	if absf(denom) < 0.0000001:
+		return p2
+	var t := _cross_2d(q1 - p1, s) / denom
+	return p1 + r * t
+
+static func _cross_2d(a: Vector2, b: Vector2) -> float:
+	return a.x * b.y - a.y * b.x
+
+static func _dedupe_polygon_points_2d(poly: Array[Vector2]) -> Array[Vector2]:
+	var out: Array[Vector2] = []
+	for p in poly:
+		if out.is_empty() or out[out.size() - 1].distance_to(p) > 0.00001:
+			out.append(p)
+	if out.size() >= 2 and out[0].distance_to(out[out.size() - 1]) <= 0.00001:
+		out.remove_at(out.size() - 1)
+	return out
+
+static func _emit_subdivided_triangle(
+	a: Vector3, b: Vector3, c: Vector3, subdiv_x: int, subdiv_y: int, tri_n: Vector3,
+	brush: BrushForge, face_index: int, base_color: Color, local_origin: Vector3,
+	u_axis: Vector3, v_axis: Vector3, face_uv: Dictionary, paint_accel: Dictionary,
+	g_verts: PackedVector3Array, g_normals: PackedVector3Array, g_uvs: PackedVector2Array, g_colors: PackedColorArray
+) -> void:
+	var sx := max(1, subdiv_x)
+	var sy := max(1, subdiv_y)
+	if sx <= 1 and sy <= 1:
 		_emit_triangle(a, b, c, tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
 		return
-	var n := subdiv
-	for i in range(n):
-		for j in range(n - i):
-			var p0 := _triangle_grid_point(a, b, c, n, i, j)
-			var p1 := _triangle_grid_point(a, b, c, n, i + 1, j)
-			var p2 := _triangle_grid_point(a, b, c, n, i, j + 1)
-			_emit_triangle(p0, p1, p2, tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
-			if i + j < n - 1:
-				var p3 := _triangle_grid_point(a, b, c, n, i + 1, j + 1)
-				_emit_triangle(p1, p3, p2, tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
+	for j in range(sy):
+		var v0 := float(j) / float(sy)
+		var v1 := float(j + 1) / float(sy)
+		for i in range(sx):
+			var p00 := _triangle_row_point(a, b, c, sx, i, v0)
+			var p10 := _triangle_row_point(a, b, c, sx, i + 1, v0)
+			var p01 := _triangle_row_point(a, b, c, sx, i, v1)
+			var p11 := _triangle_row_point(a, b, c, sx, i + 1, v1)
+			if _triangle_area_sq(p00, p10, p01) > 0.0000000001:
+				_emit_triangle(p00, p10, p01, tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
+			if _triangle_area_sq(p10, p11, p01) > 0.0000000001:
+				_emit_triangle(p10, p11, p01, tri_n, brush, face_index, base_color, local_origin, u_axis, v_axis, face_uv, paint_accel, g_verts, g_normals, g_uvs, g_colors)
 
 static func _triangle_grid_point(a: Vector3, b: Vector3, c: Vector3, n: int, i: int, j: int) -> Vector3:
 	var fi := float(i) / float(n)
 	var fj := float(j) / float(n)
 	var w := 1.0 - fi - fj
 	return a * w + b * fi + c * fj
+
+static func _triangle_grid_point_uv(a: Vector3, b: Vector3, c: Vector3, u: float, v: float) -> Vector3:
+	return a + (b - a) * u + (c - a) * v
+
+static func _triangle_row_point(a: Vector3, b: Vector3, c: Vector3, sx: int, i: int, v: float) -> Vector3:
+	var t := float(i) / float(max(1, sx))
+	var u := (1.0 - v) * t
+	return a + (b - a) * u + (c - a) * v
+
+static func _triangle_area_sq(a: Vector3, b: Vector3, c: Vector3) -> float:
+	return ((b - a).cross(c - a)).length_squared()
 
 static func _emit_triangle(
 	a: Vector3, b: Vector3, c: Vector3, tri_n: Vector3,

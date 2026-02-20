@@ -1,0 +1,21 @@
+[gd_resource type="StandardMaterial3D" load_steps=5 format=3 uid="uid://etn88hvrcpqd"]
+
+[ext_resource type="Texture2D" uid="uid://c1ga4k1qmo2em" path="res://Resources/Models/Car/Audi 80 v2 Texturing_Old rubber_BaseColor-Old rubber_Alpha.png" id="1_38boy"]
+[ext_resource type="Texture2D" uid="uid://8tjme3frxudi" path="res://Resources/Models/Car/Audi 80 v2 Texturing_Old rubber_Emissive.jpg" id="2_gmmuw"]
+[ext_resource type="Texture2D" uid="uid://cbx6efjp8slul" path="res://Resources/Models/Car/Audi 80 v2 Texturing_Old rubber_Metallic-Old rubber_Roughness.png" id="3_vu1gf"]
+[ext_resource type="Texture2D" uid="uid://cfup3jvsdlqn5" path="res://Resources/Models/Car/Audi 80 v2 Texturing_Old rubber_Normal.jpg" id="4_nt2wb"]
+
+[resource]
+resource_name = "Old rubber"
+transparency = 4
+cull_mode = 2
+albedo_texture = ExtResource("1_38boy")
+metallic_specular = 0.1
+metallic_texture = ExtResource("3_vu1gf")
+metallic_texture_channel = 2
+roughness_texture = ExtResource("3_vu1gf")
+roughness_texture_channel = 1
+emission_enabled = true
+emission_texture = ExtResource("2_gmmuw")
+normal_enabled = true
+normal_texture = ExtResource("4_nt2wb")

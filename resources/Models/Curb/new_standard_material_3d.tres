@@ -1,0 +1,17 @@
+[gd_resource type="StandardMaterial3D" format=3 uid="uid://djjfo8u7xnmyc"]
+
+[ext_resource type="Texture2D" uid="uid://cy8gnrgqvk81c" path="res://resources/Models/Curb/Curb_PavingEdge002_2K-JPG_Color.jpg" id="1_r2f5f"]
+[ext_resource type="Texture2D" uid="uid://cduqflxcc0t01" path="res://resources/Models/Curb/Curb_PavingEdge002_2K-JPG_Roughness.png" id="2_c13kd"]
+[ext_resource type="Texture2D" uid="uid://dp1c0cjuauhi3" path="res://resources/Models/Curb/Curb_PavingEdge002_2K-JPG_NormalGL.jpg" id="3_pwabb"]
+
+[resource]
+resource_name = "PavingEdge002_1K-PNG_NORMAL"
+albedo_color = Color(0.6536459, 0.6536459, 0.6536459, 1)
+albedo_texture = ExtResource("1_r2f5f")
+metallic_texture = ExtResource("2_c13kd")
+metallic_texture_channel = 2
+roughness = 0.6
+roughness_texture = ExtResource("2_c13kd")
+roughness_texture_channel = 1
+normal_enabled = true
+normal_texture = ExtResource("3_pwabb")

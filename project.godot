@@ -18,6 +18,17 @@ config/icon="uid://ci1bf4nfsrwcp"
 
 enabled=PackedStringArray("res://addons/brush_forge_editor/plugin.cfg")
 
+[file_customization]
+
+folder_colors={
+"res://resources/": "purple"
+}
+
+[layer_names]
+
+3d_render/layer_6="LightRain"
+3d_render/layer_10="MapDecals"
+
 [physics]
 
 3d/physics_engine="Jolt Physics"

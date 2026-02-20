@@ -1,0 +1,9 @@
+[gd_resource type="StandardMaterial3D" load_steps=2 format=3 uid="uid://240ex4qopat6"]
+
+[ext_resource type="Texture2D" uid="uid://7dofvob2jgo8" path="res://Resources/Models/Car/IHD 150_transparent.png" id="1_0jnjl"]
+
+[resource]
+resource_name = "Licence"
+transparency = 1
+albedo_texture = ExtResource("1_0jnjl")
+roughness = 0.5
