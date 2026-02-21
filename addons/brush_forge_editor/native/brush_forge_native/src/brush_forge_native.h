@@ -6,6 +6,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 
@@ -35,6 +36,51 @@ public:
 		const PackedFloat32Array &plane_distances,
 		const Vector3 &ray_origin,
 		const Vector3 &ray_dir) const;
+	Array build_candidate_edges(
+		const PackedVector3Array &plane_normals,
+		const PackedFloat32Array &plane_distances,
+		const PackedVector3Array &vertices_world,
+		float epsilon = 0.02f,
+		int min_incident = 3) const;
+	PackedInt32Array face_vertex_indices(
+		const PackedVector3Array &plane_normals,
+		const PackedFloat32Array &plane_distances,
+		const PackedVector3Array &vertices_world,
+		int face_index,
+		float epsilon = 0.02f) const;
+	int nearest_vertex_index(const PackedVector3Array &vertices_world, const Vector3 &point) const;
+	PackedInt32Array incident_plane_indices_for_vertex(
+		const PackedVector3Array &plane_normals,
+		const PackedFloat32Array &plane_distances,
+		const Vector3 &vertex,
+		float epsilon = 0.02f,
+		int min_incident = 3) const;
+	PackedInt32Array best_fit_plane_indices(
+		const PackedVector3Array &plane_normals,
+		const PackedFloat32Array &plane_distances,
+		const PackedVector3Array &vertices_world,
+		int target_count = 3) const;
+	Array build_plane_vertex_incidence(
+		const PackedVector3Array &plane_normals,
+		const PackedFloat32Array &plane_distances,
+		const PackedVector3Array &vertices_world,
+		float epsilon = 0.02f) const;
+	PackedInt32Array resolve_drag_plane_indices(
+		const PackedVector3Array &plane_normals,
+		const PackedFloat32Array &plane_distances,
+		const PackedVector3Array &selected_vertices_world,
+		int target_count = 3,
+		float epsilon = 0.02f,
+		int min_incident = 3) const;
+	int pick_vertex_screen(
+		const PackedVector2Array &screen_positions,
+		const Vector2 &mouse_pos,
+		float threshold = 16.0f) const;
+	Dictionary pick_edge_screen(
+		const PackedVector2Array &screen_positions,
+		const Array &edges,
+		const Vector2 &mouse_pos,
+		float threshold = 14.0f) const;
 	bool structure_states_equal(const Array &a, const Array &b) const;
 	bool states_equal(const Array &a, const Array &b) const;
 	Array clone_state(const Array &state) const;

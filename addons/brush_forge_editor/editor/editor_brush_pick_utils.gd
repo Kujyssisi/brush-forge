@@ -9,6 +9,7 @@ static var _native_available := false
 static var _native_extension_resource: Resource
 static var _native_instance: Object
 static var _brush_plane_cache: Dictionary = {}
+static var _native_error_once: Dictionary = {}
 
 static func pick_exact_face_on_brush(map_node: BrushForgeMap, brush_index: int, camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
 	if map_node == null:
@@ -20,47 +21,20 @@ static func pick_exact_face_on_brush(map_node: BrushForgeMap, brush_index: int, 
 		return {}
 	var origin: Vector3 = camera.project_ray_origin(mouse_pos)
 	var dir: Vector3 = camera.project_ray_normal(mouse_pos).normalized()
-	var native_result := _pick_exact_face_native(brush, origin, dir)
-	if not native_result.is_empty():
-		return native_result
-	var best_t: float = INF
-	var best_face_index: int = -1
-	var best_hit: Vector3 = Vector3.ZERO
-	var planes: Array = brush.planes
-	for i in range(planes.size()):
-		var plane: NeoPlane = planes[i] as NeoPlane
-		if plane == null:
-			continue
-		var denom: float = plane.normal.dot(dir)
-		if absf(denom) < 0.00001:
-			continue
-		var t: float = (plane.distance - plane.normal.dot(origin)) / denom
-		if t < 0.0:
-			continue
-		var hit: Vector3 = origin + dir * t
-		if not _point_inside_brush_planes(hit, planes, 0.005):
-			continue
-		if t < best_t:
-			best_t = t
-			best_face_index = i
-			best_hit = hit
-	if best_face_index < 0:
-		return {}
-	return {
-		"face_index": best_face_index,
-		"hit": best_hit,
-		"t": best_t,
-	}
+	return _pick_exact_face_native(brush, origin, dir)
 
 static func _pick_exact_face_native(brush: BrushForge, origin: Vector3, dir: Vector3) -> Dictionary:
 	if brush == null:
 		return {}
 	if not _is_native_available():
+		_report_native_error_once("pick_exact_face", "native extension unavailable: %s" % NATIVE_EXTENSION_PATH)
 		return {}
 	var native_obj = _get_native_instance()
 	if native_obj == null:
+		_report_native_error_once("pick_exact_face", "failed to instantiate %s" % NATIVE_CLASS_NAME)
 		return {}
 	if not native_obj.has_method("pick_exact_face"):
+		_report_native_error_once("pick_exact_face", "missing native method on %s" % NATIVE_CLASS_NAME)
 		return {}
 	var cache := _get_or_build_plane_cache(brush)
 	var plane_normals: PackedVector3Array = cache.get("normals", PackedVector3Array())
@@ -68,6 +42,7 @@ static func _pick_exact_face_native(brush: BrushForge, origin: Vector3, dir: Vec
 	var result = native_obj.call("pick_exact_face", plane_normals, plane_distances, origin, dir)
 	if result is Dictionary:
 		return result
+	_report_native_error_once("pick_exact_face", "native returned invalid result type")
 	return {}
 
 static func invalidate_brush_pick_cache(brush: BrushForge) -> void:
@@ -77,6 +52,9 @@ static func invalidate_brush_pick_cache(brush: BrushForge) -> void:
 
 static func invalidate_all_pick_cache() -> void:
 	_brush_plane_cache.clear()
+
+static func get_brush_plane_cache(brush: BrushForge) -> Dictionary:
+	return _get_or_build_plane_cache(brush)
 
 static func _get_or_build_plane_cache(brush: BrushForge) -> Dictionary:
 	if brush == null:
@@ -112,11 +90,9 @@ static func _get_native_instance() -> Object:
 		_native_instance = ClassDB.instantiate(NATIVE_CLASS_NAME)
 	return _native_instance
 
-static func _point_inside_brush_planes(point: Vector3, planes: Array, eps: float) -> bool:
-	for p in planes:
-		var plane: NeoPlane = p as NeoPlane
-		if plane == null:
-			continue
-		if plane.normal.dot(point) > plane.distance + eps:
-			return false
-	return true
+static func _report_native_error_once(method_name: String, reason: String) -> void:
+	var key := "%s|%s" % [method_name, reason]
+	if _native_error_once.has(key):
+		return
+	_native_error_once[key] = true
+	push_error("[BrushForgeNative] %s failed: %s" % [method_name, reason])

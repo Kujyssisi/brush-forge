@@ -7,6 +7,7 @@ const GIZMO_SHAPE_BUILDER_SCRIPT = preload("res://addons/brush_forge_editor/edit
 const EDITOR_MATH_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_math_utils.gd")
 const EDITOR_BAKE_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_bake_utils.gd")
 const EDITOR_STATE_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_state_utils.gd")
+const EDITOR_STATE_NATIVE_BRIDGE_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_state_native_bridge.gd")
 const EDITOR_UV_TEXTURE_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_uv_texture_utils.gd")
 const EDITOR_BRUSH_PICK_UTILS_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_brush_pick_utils.gd")
 const BRUSH_FORGE_MAP_SCRIPT = preload("res://addons/brush_forge_editor/core/brush_forge_map.gd")
@@ -222,6 +223,7 @@ var uv_snap_enabled := true
 var uv_snap_step := 0.125
 var uv_preview_vertex_mode := false
 var map_custom_type_registered := false
+var native_runtime_errors_reported := {}
 
 func _build_brush_mesh(brush: BrushForge) -> ArrayMesh:
 	_sanitize_brush_face_data(brush)
@@ -239,6 +241,32 @@ func _get_brush_vertices_world(brush: BrushForge) -> Array[Vector3]:
 		return BRUSH_MESH_BUILDER_SCRIPT.get_brush_vertices_world(brush)
 	var empty: Array[Vector3] = []
 	return empty
+
+func _get_brush_plane_arrays(brush: BrushForge) -> Dictionary:
+	if brush == null:
+		return {}
+	var cache := EDITOR_BRUSH_PICK_UTILS_SCRIPT.get_brush_plane_cache(brush)
+	var normals: PackedVector3Array = cache.get("normals", PackedVector3Array())
+	var distances: PackedFloat32Array = cache.get("distances", PackedFloat32Array())
+	if normals.is_empty() or distances.size() != normals.size():
+		return {}
+	return {"normals": normals, "distances": distances}
+
+func _to_packed_vector3_array(vertices: Array[Vector3]) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	for v in vertices:
+		out.append(v)
+	return out
+
+func _report_native_runtime_error_once(method_name: String, details: String = "") -> void:
+	var key := method_name if details == "" else "%s|%s" % [method_name, details]
+	if native_runtime_errors_reported.has(key):
+		return
+	native_runtime_errors_reported[key] = true
+	var msg := "[BrushForgeNative] %s failed" % method_name
+	if details != "":
+		msg += ": %s" % details
+	push_error(msg)
 
 func _enter_tree():
 	if not map_custom_type_registered:
@@ -3010,18 +3038,15 @@ func _pick_vertex_on_selected_brush(camera: Camera3D, mouse_pos: Vector2) -> int
 	var vertices := _get_brush_vertices_world(brush)
 	if vertices.is_empty():
 		return -1
-	var best_idx := -1
-	var best_dist := INF
+	var screen_positions := PackedVector2Array()
+	screen_positions.resize(vertices.size())
 	for i in range(vertices.size()):
-		var v: Vector3 = vertices[i]
-		var s := camera.unproject_position(v)
-		var d := s.distance_to(mouse_pos)
-		if d < best_dist:
-			best_dist = d
-			best_idx = i
-	if best_dist > 16.0:
-		return -1
-	return best_idx
+		screen_positions[i] = camera.unproject_position(vertices[i])
+	var native_pick = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.pick_vertex_screen(screen_positions, mouse_pos, 16.0)
+	if native_pick is int:
+		return int(native_pick)
+	_report_native_runtime_error_once("pick_vertex_screen", "invalid native return type")
+	return -1
 
 func _pick_edge_on_selected_brush(camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
 	if selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size():
@@ -3035,34 +3060,31 @@ func _pick_edge_on_selected_brush(camera: Camera3D, mouse_pos: Vector2) -> Dicti
 	var edges := _build_candidate_edges(brush, vertices)
 	if edges.is_empty():
 		return {}
-	var best := {}
-	var best_d := INF
-	for e in edges:
-		var a := int(e["a"])
-		var b := int(e["b"])
-		var sa := camera.unproject_position(vertices[a])
-		var sb := camera.unproject_position(vertices[b])
-		var d := Geometry2D.get_closest_point_to_segment(mouse_pos, sa, sb).distance_to(mouse_pos)
-		if d < best_d:
-			best_d = d
-			best = e
-	if best_d > 14.0:
-		return {}
-	return best
+	var screen_positions := PackedVector2Array()
+	screen_positions.resize(vertices.size())
+	for i in range(vertices.size()):
+		screen_positions[i] = camera.unproject_position(vertices[i])
+	var native_pick = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.pick_edge_screen(screen_positions, edges, mouse_pos, 14.0)
+	if native_pick is Dictionary:
+		return native_pick
+	_report_native_runtime_error_once("pick_edge_screen", "invalid native return type")
+	return {}
 
 func _build_candidate_edges(brush: BrushForge, vertices: Array[Vector3]) -> Array:
-	var edges := []
-	for i in range(vertices.size()):
-		var pi := _incident_plane_indices_for_vertex(brush, vertices[i])
-		for j in range(i + 1, vertices.size()):
-			var pj := _incident_plane_indices_for_vertex(brush, vertices[j])
-			var shared := 0
-			for idx in pi:
-				if pj.find(idx) >= 0:
-					shared += 1
-			if shared >= 2:
-				edges.append({"a": i, "b": j})
-	return edges
+	if brush == null or vertices.is_empty():
+		return []
+	var plane_data := _get_brush_plane_arrays(brush)
+	if plane_data.is_empty():
+		_report_native_runtime_error_once("build_candidate_edges", "missing brush plane cache")
+		return []
+	var normals: PackedVector3Array = plane_data["normals"]
+	var distances: PackedFloat32Array = plane_data["distances"]
+	var native_vertices := _to_packed_vector3_array(vertices)
+	var native_edges = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.build_candidate_edges(normals, distances, native_vertices, 0.02, 3)
+	if native_edges is Array:
+		return native_edges
+	_report_native_runtime_error_once("build_candidate_edges", "invalid native return type")
+	return []
 
 func _set_selected_vertices_from_face_index(face_index: int) -> void:
 	selected_vertex_indices.clear()
@@ -3081,13 +3103,19 @@ func _get_face_vertex_indices(face_index: int) -> Array[int]:
 	var vertices := _get_brush_vertices_world(brush)
 	if vertices.is_empty() or face_index < 0 or face_index >= brush.planes.size():
 		return out
-	var plane: NeoPlane = brush.planes[face_index] as NeoPlane
-	if plane == null:
+	var plane_data := _get_brush_plane_arrays(brush)
+	if plane_data.is_empty():
+		_report_native_runtime_error_once("face_vertex_indices", "missing brush plane cache")
 		return out
-	for i in range(vertices.size()):
-		var v: Vector3 = vertices[i]
-		if absf(plane.normal.dot(v) - plane.distance) <= 0.02:
-			out.append(i)
+	var normals: PackedVector3Array = plane_data["normals"]
+	var distances: PackedFloat32Array = plane_data["distances"]
+	var native_vertices := _to_packed_vector3_array(vertices)
+	var native_indices = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.face_vertex_indices(normals, distances, native_vertices, face_index, 0.02)
+	if native_indices is PackedInt32Array:
+		for idx in native_indices:
+			out.append(int(idx))
+		return out
+	_report_native_runtime_error_once("face_vertex_indices", "invalid native return type")
 	return out
 
 func _toggle_vertex_indices(indices: Array[int]) -> void:
@@ -3101,14 +3129,12 @@ func _toggle_vertex_indices(indices: Array[int]) -> void:
 func _find_nearest_vertex_index(vertices: Array[Vector3], point: Vector3) -> int:
 	if vertices.is_empty():
 		return -1
-	var best_idx := -1
-	var best_d := INF
-	for i in range(vertices.size()):
-		var d := vertices[i].distance_to(point)
-		if d < best_d:
-			best_d = d
-			best_idx = i
-	return best_idx
+	var native_vertices := _to_packed_vector3_array(vertices)
+	var native_idx = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.nearest_vertex_index(native_vertices, point)
+	if native_idx is int:
+		return int(native_idx)
+	_report_native_runtime_error_once("nearest_vertex_index", "invalid native return type")
+	return -1
 
 func _get_selected_vertices_world(brush: BrushForge) -> Array[Vector3]:
 	var out: Array[Vector3] = []
@@ -3136,91 +3162,40 @@ func _get_selected_vertices_anchor_world() -> Variant:
 		acc += v
 	return acc / float(selected_vertices.size())
 
-func _shared_plane_indices_for_vertices(brush: BrushForge, vertices: Array[Vector3]) -> Array[int]:
-	var out: Array[int] = []
-	if brush == null or vertices.is_empty():
-		return out
-	var shared := _incident_plane_indices_for_vertex(brush, vertices[0])
-	for i in range(1, vertices.size()):
-		var vv: Vector3 = vertices[i]
-		var inc := _incident_plane_indices_for_vertex(brush, vv)
-		var next_shared: Array[int] = []
-		for idx in shared:
-			if inc.find(idx) >= 0:
-				next_shared.append(idx)
-		shared = next_shared
-	if shared.is_empty():
-		shared = _incident_plane_indices_for_vertex(brush, vertices[0])
-	return shared
-
 func _resolve_drag_plane_indices(brush: BrushForge, vertices: Array[Vector3]) -> Array[int]:
 	var out: Array[int] = []
 	if brush == null or vertices.is_empty():
 		return out
-	if vertices.size() == 1:
-		var single: Vector3 = vertices[0]
-		return _best_fit_plane_indices_for_vertices(brush, [single], 3)
-	var shared := _shared_plane_indices_for_vertices(brush, vertices)
-	if not shared.is_empty():
-		return shared
-	# If strict shared-set fails, use union of incident planes so selected elements still move.
-	var union_map := {}
-	for vv in vertices:
-		var incident := _incident_plane_indices_for_vertex(brush, vv)
-		for pi in incident:
-			union_map[int(pi)] = true
-	for k in union_map.keys():
-		out.append(int(k))
-	out.sort()
-	return out
-
-func _best_fit_plane_indices_for_vertices(brush: BrushForge, vertices: Array[Vector3], target_count: int) -> Array[int]:
-	var scored := []
-	if brush == null or vertices.is_empty():
-		var empty: Array[int] = []
-		return empty
-	for i in range(brush.planes.size()):
-		var plane: NeoPlane = brush.planes[i] as NeoPlane
-		if plane == null:
-			continue
-		var max_err := 0.0
-		var sum_err := 0.0
-		for v in vertices:
-			var err := absf(plane.normal.dot(v) - plane.distance)
-			max_err = maxf(max_err, err)
-			sum_err += err
-		scored.append({
-			"i": i,
-			"max_err": max_err,
-			"avg_err": sum_err / float(vertices.size()),
-		})
-	scored.sort_custom(func(a, b):
-		if a["max_err"] == b["max_err"]:
-			return a["avg_err"] < b["avg_err"]
-		return a["max_err"] < b["max_err"]
-	)
-	var out: Array[int] = []
-	for s in scored:
-		out.append(int(s["i"]))
-		if out.size() >= max(target_count, 1):
-			break
+	var plane_data := _get_brush_plane_arrays(brush)
+	if plane_data.is_empty():
+		_report_native_runtime_error_once("resolve_drag_plane_indices", "missing brush plane cache")
+		return out
+	var normals: PackedVector3Array = plane_data["normals"]
+	var distances: PackedFloat32Array = plane_data["distances"]
+	var native_vertices := _to_packed_vector3_array(vertices)
+	var native_out = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.resolve_drag_plane_indices(normals, distances, native_vertices, 3, 0.02, 3)
+	if native_out is PackedInt32Array:
+		for idx in native_out:
+			out.append(int(idx))
+		return out
+	_report_native_runtime_error_once("resolve_drag_plane_indices", "invalid native return type")
 	return out
 
 func _build_plane_vertex_incidence(brush: BrushForge, vertices: Array[Vector3]) -> Array:
-	var out: Array = []
 	if brush == null:
-		return out
-	out.resize(brush.planes.size())
-	for pi in range(brush.planes.size()):
-		var incident := []
-		var plane: NeoPlane = brush.planes[pi] as NeoPlane
-		if plane != null:
-			for vi in range(vertices.size()):
-				var v: Vector3 = vertices[vi]
-				if absf(plane.normal.dot(v) - plane.distance) <= 0.02:
-					incident.append(vi)
-		out[pi] = incident
-	return out
+		return []
+	var plane_data := _get_brush_plane_arrays(brush)
+	if plane_data.is_empty():
+		_report_native_runtime_error_once("build_plane_vertex_incidence", "missing brush plane cache")
+		return []
+	var normals: PackedVector3Array = plane_data["normals"]
+	var distances: PackedFloat32Array = plane_data["distances"]
+	var native_vertices := _to_packed_vector3_array(vertices)
+	var native_incidence = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.build_plane_vertex_incidence(normals, distances, native_vertices, 0.02)
+	if native_incidence is Array:
+		return native_incidence
+	_report_native_runtime_error_once("build_plane_vertex_incidence", "invalid native return type")
+	return []
 
 func _fit_plane_from_points(points: Array[Vector3], reference_normal: Vector3) -> Variant:
 	if points.size() < 3:
@@ -3258,30 +3233,6 @@ func _fit_plane_from_points(points: Array[Vector3], reference_normal: Vector3) -
 	var first: Vector3 = ordered[0]["p"]
 	var distance := normal.dot(first)
 	return NeoPlane.new(normal, distance)
-
-func _incident_plane_indices_for_vertex(brush: BrushForge, vertex: Vector3) -> Array[int]:
-	var out: Array[int] = []
-	if brush == null:
-		return out
-	var scored := []
-	for i in range(brush.planes.size()):
-		var plane: NeoPlane = brush.planes[i] as NeoPlane
-		if plane == null:
-			continue
-		var err := absf(plane.normal.dot(vertex) - plane.distance)
-		scored.append({"i": i, "e": err})
-		if err <= 0.02:
-			out.append(i)
-	if out.size() >= 3:
-		return out
-	scored.sort_custom(func(a, b): return a["e"] < b["e"])
-	for s in scored:
-		var idx := int(s["i"])
-		if out.find(idx) < 0:
-			out.append(idx)
-		if out.size() >= 3:
-			break
-	return out
 
 func _clone_plane_array(planes: Array) -> Array:
 	var out: Array = []

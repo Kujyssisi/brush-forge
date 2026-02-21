@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace godot;
@@ -273,6 +275,106 @@ float triangle_area_sq(const Vector3 &a, const Vector3 &b, const Vector3 &c) {
 	return ((b - a).cross(c - a)).length_squared();
 }
 
+struct PlaneScore {
+	int index = -1;
+	float max_err = 0.0f;
+	float avg_err = 0.0f;
+};
+
+std::vector<int> incident_plane_indices_for_vertex_internal(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const Vector3 &vertex,
+	float epsilon,
+	int min_incident) {
+	std::vector<int> out;
+	std::vector<std::pair<float, int>> scored;
+	const int plane_count = plane_normals.size();
+	if (plane_count == 0 || plane_distances.size() != plane_count) {
+		return out;
+	}
+	out.reserve((size_t)MAX(min_incident, 1));
+	scored.reserve((size_t)plane_count);
+	for (int i = 0; i < plane_count; i++) {
+		const float err = Math::abs(plane_normals[i].dot(vertex) - plane_distances[i]);
+		scored.push_back({ err, i });
+		if (err <= epsilon) {
+			out.push_back(i);
+		}
+	}
+	if ((int)out.size() >= min_incident) {
+		return out;
+	}
+	std::sort(scored.begin(), scored.end(), [](const std::pair<float, int> &a, const std::pair<float, int> &b) {
+		return a.first < b.first;
+	});
+	for (const auto &entry : scored) {
+		const int idx = entry.second;
+		if (std::find(out.begin(), out.end(), idx) == out.end()) {
+			out.push_back(idx);
+		}
+		if ((int)out.size() >= min_incident) {
+			break;
+		}
+	}
+	return out;
+}
+
+std::vector<int> best_fit_plane_indices_internal(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const PackedVector3Array &vertices_world,
+	int target_count) {
+	std::vector<int> out;
+	const int plane_count = plane_normals.size();
+	const int vertex_count = vertices_world.size();
+	if (plane_count == 0 || plane_distances.size() != plane_count || vertex_count == 0) {
+		return out;
+	}
+	std::vector<PlaneScore> scored;
+	scored.reserve((size_t)plane_count);
+	for (int i = 0; i < plane_count; i++) {
+		float max_err = 0.0f;
+		float sum_err = 0.0f;
+		for (int v = 0; v < vertex_count; v++) {
+			const float err = Math::abs(plane_normals[i].dot(vertices_world[v]) - plane_distances[i]);
+			max_err = MAX(max_err, err);
+			sum_err += err;
+		}
+		PlaneScore score;
+		score.index = i;
+		score.max_err = max_err;
+		score.avg_err = sum_err / (float)vertex_count;
+		scored.push_back(score);
+	}
+	std::sort(scored.begin(), scored.end(), [](const PlaneScore &a, const PlaneScore &b) {
+		if (a.max_err == b.max_err) {
+			return a.avg_err < b.avg_err;
+		}
+		return a.max_err < b.max_err;
+	});
+	const int desired = MAX(target_count, 1);
+	out.reserve((size_t)desired);
+	for (const PlaneScore &score : scored) {
+		out.push_back(score.index);
+		if ((int)out.size() >= desired) {
+			break;
+		}
+	}
+	return out;
+}
+
+float distance_to_segment_2d(const Vector2 &p, const Vector2 &a, const Vector2 &b) {
+	const Vector2 ab = b - a;
+	const float len_sq = ab.length_squared();
+	if (len_sq <= 0.0000001f) {
+		return p.distance_to(a);
+	}
+	const float t = Math::clamp((p - a).dot(ab) / len_sq, 0.0f, 1.0f);
+	const Vector2 closest = a + ab * t;
+	return p.distance_to(closest);
+}
+
 void emit_triangle(
 	const Vector3 &a,
 	const Vector3 &b,
@@ -485,6 +587,43 @@ void BrushForgeNative::_bind_methods() {
 	ClassDB::bind_method(
 		D_METHOD("pick_exact_face", "plane_normals", "plane_distances", "ray_origin", "ray_dir"),
 		&BrushForgeNative::pick_exact_face);
+	ClassDB::bind_method(
+		D_METHOD("build_candidate_edges", "plane_normals", "plane_distances", "vertices_world", "epsilon", "min_incident"),
+		&BrushForgeNative::build_candidate_edges,
+		DEFVAL(0.02f),
+		DEFVAL(3));
+	ClassDB::bind_method(
+		D_METHOD("face_vertex_indices", "plane_normals", "plane_distances", "vertices_world", "face_index", "epsilon"),
+		&BrushForgeNative::face_vertex_indices,
+		DEFVAL(0.02f));
+	ClassDB::bind_method(D_METHOD("nearest_vertex_index", "vertices_world", "point"), &BrushForgeNative::nearest_vertex_index);
+	ClassDB::bind_method(
+		D_METHOD("incident_plane_indices_for_vertex", "plane_normals", "plane_distances", "vertex", "epsilon", "min_incident"),
+		&BrushForgeNative::incident_plane_indices_for_vertex,
+		DEFVAL(0.02f),
+		DEFVAL(3));
+	ClassDB::bind_method(
+		D_METHOD("best_fit_plane_indices", "plane_normals", "plane_distances", "vertices_world", "target_count"),
+		&BrushForgeNative::best_fit_plane_indices,
+		DEFVAL(3));
+	ClassDB::bind_method(
+		D_METHOD("build_plane_vertex_incidence", "plane_normals", "plane_distances", "vertices_world", "epsilon"),
+		&BrushForgeNative::build_plane_vertex_incidence,
+		DEFVAL(0.02f));
+	ClassDB::bind_method(
+		D_METHOD("resolve_drag_plane_indices", "plane_normals", "plane_distances", "selected_vertices_world", "target_count", "epsilon", "min_incident"),
+		&BrushForgeNative::resolve_drag_plane_indices,
+		DEFVAL(3),
+		DEFVAL(0.02f),
+		DEFVAL(3));
+	ClassDB::bind_method(
+		D_METHOD("pick_vertex_screen", "screen_positions", "mouse_pos", "threshold"),
+		&BrushForgeNative::pick_vertex_screen,
+		DEFVAL(16.0f));
+	ClassDB::bind_method(
+		D_METHOD("pick_edge_screen", "screen_positions", "edges", "mouse_pos", "threshold"),
+		&BrushForgeNative::pick_edge_screen,
+		DEFVAL(14.0f));
 	ClassDB::bind_method(D_METHOD("structure_states_equal", "a", "b"), &BrushForgeNative::structure_states_equal);
 	ClassDB::bind_method(D_METHOD("states_equal", "a", "b"), &BrushForgeNative::states_equal);
 	ClassDB::bind_method(D_METHOD("clone_state", "state"), &BrushForgeNative::clone_state);
@@ -764,6 +903,284 @@ Dictionary BrushForgeNative::pick_exact_face(
 	out["face_index"] = best_face_index;
 	out["hit"] = best_hit;
 	out["t"] = best_t;
+	return out;
+}
+
+Array BrushForgeNative::build_candidate_edges(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const PackedVector3Array &vertices_world,
+	float epsilon,
+	int min_incident) const {
+	Array out;
+	const int vertex_count = vertices_world.size();
+	if (vertex_count < 2) {
+		return out;
+	}
+	if (plane_normals.size() == 0 || plane_distances.size() != plane_normals.size()) {
+		return out;
+	}
+	std::vector<std::vector<int>> incidence;
+	incidence.reserve((size_t)vertex_count);
+	for (int i = 0; i < vertex_count; i++) {
+		incidence.push_back(incident_plane_indices_for_vertex_internal(
+			plane_normals,
+			plane_distances,
+			vertices_world[i],
+			epsilon,
+			MAX(min_incident, 1)));
+	}
+	for (int i = 0; i < vertex_count; i++) {
+		const std::vector<int> &pi = incidence[(size_t)i];
+		std::unordered_set<int> pi_set(pi.begin(), pi.end());
+		for (int j = i + 1; j < vertex_count; j++) {
+			const std::vector<int> &pj = incidence[(size_t)j];
+			int shared = 0;
+			for (int idx : pj) {
+				if (pi_set.find(idx) != pi_set.end()) {
+					shared += 1;
+					if (shared >= 2) {
+						break;
+					}
+				}
+			}
+			if (shared >= 2) {
+				Dictionary e;
+				e["a"] = i;
+				e["b"] = j;
+				out.push_back(e);
+			}
+		}
+	}
+	return out;
+}
+
+PackedInt32Array BrushForgeNative::face_vertex_indices(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const PackedVector3Array &vertices_world,
+	int face_index,
+	float epsilon) const {
+	PackedInt32Array out;
+	const int plane_count = plane_normals.size();
+	if (plane_count == 0 || plane_distances.size() != plane_count) {
+		return out;
+	}
+	if (face_index < 0 || face_index >= plane_count) {
+		return out;
+	}
+	const Vector3 normal = plane_normals[face_index];
+	const float distance = plane_distances[face_index];
+	for (int i = 0; i < vertices_world.size(); i++) {
+		const Vector3 v = vertices_world[i];
+		if (Math::abs(normal.dot(v) - distance) <= epsilon) {
+			out.push_back(i);
+		}
+	}
+	return out;
+}
+
+int BrushForgeNative::nearest_vertex_index(const PackedVector3Array &vertices_world, const Vector3 &point) const {
+	if (vertices_world.is_empty()) {
+		return -1;
+	}
+	int best_idx = -1;
+	float best_d_sq = std::numeric_limits<float>::infinity();
+	for (int i = 0; i < vertices_world.size(); i++) {
+		const float d_sq = point.distance_squared_to(vertices_world[i]);
+		if (d_sq < best_d_sq) {
+			best_d_sq = d_sq;
+			best_idx = i;
+		}
+	}
+	return best_idx;
+}
+
+PackedInt32Array BrushForgeNative::incident_plane_indices_for_vertex(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const Vector3 &vertex,
+	float epsilon,
+	int min_incident) const {
+	PackedInt32Array out;
+	const std::vector<int> indices = incident_plane_indices_for_vertex_internal(
+		plane_normals,
+		plane_distances,
+		vertex,
+		epsilon,
+		MAX(min_incident, 1));
+	for (int idx : indices) {
+		out.push_back(idx);
+	}
+	return out;
+}
+
+PackedInt32Array BrushForgeNative::best_fit_plane_indices(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const PackedVector3Array &vertices_world,
+	int target_count) const {
+	PackedInt32Array out;
+	const std::vector<int> indices = best_fit_plane_indices_internal(
+		plane_normals,
+		plane_distances,
+		vertices_world,
+		target_count);
+	for (int idx : indices) {
+		out.push_back(idx);
+	}
+	return out;
+}
+
+Array BrushForgeNative::build_plane_vertex_incidence(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const PackedVector3Array &vertices_world,
+	float epsilon) const {
+	Array out;
+	const int plane_count = plane_normals.size();
+	if (plane_count == 0 || plane_distances.size() != plane_count) {
+		return out;
+	}
+	out.resize(plane_count);
+	for (int pi = 0; pi < plane_count; pi++) {
+		PackedInt32Array incident;
+		const Vector3 normal = plane_normals[pi];
+		const float distance = plane_distances[pi];
+		for (int vi = 0; vi < vertices_world.size(); vi++) {
+			const Vector3 v = vertices_world[vi];
+			if (Math::abs(normal.dot(v) - distance) <= epsilon) {
+				incident.push_back(vi);
+			}
+		}
+		out[pi] = incident;
+	}
+	return out;
+}
+
+PackedInt32Array BrushForgeNative::resolve_drag_plane_indices(
+	const PackedVector3Array &plane_normals,
+	const PackedFloat32Array &plane_distances,
+	const PackedVector3Array &selected_vertices_world,
+	int target_count,
+	float epsilon,
+	int min_incident) const {
+	PackedInt32Array out;
+	const int vertex_count = selected_vertices_world.size();
+	const int plane_count = plane_normals.size();
+	if (vertex_count == 0 || plane_count == 0 || plane_distances.size() != plane_count) {
+		return out;
+	}
+	if (vertex_count == 1) {
+		PackedVector3Array single;
+		single.push_back(selected_vertices_world[0]);
+		return best_fit_plane_indices(plane_normals, plane_distances, single, target_count);
+	}
+
+	std::vector<std::vector<int>> incidence;
+	incidence.reserve((size_t)vertex_count);
+	for (int i = 0; i < vertex_count; i++) {
+		incidence.push_back(incident_plane_indices_for_vertex_internal(
+			plane_normals,
+			plane_distances,
+			selected_vertices_world[i],
+			epsilon,
+			MAX(min_incident, 1)));
+	}
+
+	std::unordered_set<int> shared;
+	for (int idx : incidence[0]) {
+		shared.insert(idx);
+	}
+	for (int i = 1; i < vertex_count; i++) {
+		std::unordered_set<int> next_shared;
+		for (int idx : incidence[(size_t)i]) {
+			if (shared.find(idx) != shared.end()) {
+				next_shared.insert(idx);
+			}
+		}
+		shared = next_shared;
+	}
+	if (!shared.empty()) {
+		std::vector<int> sorted(shared.begin(), shared.end());
+		std::sort(sorted.begin(), sorted.end());
+		for (int idx : sorted) {
+			out.push_back(idx);
+		}
+		return out;
+	}
+
+	std::unordered_set<int> uni;
+	for (const std::vector<int> &inc : incidence) {
+		for (int idx : inc) {
+			uni.insert(idx);
+		}
+	}
+	std::vector<int> sorted_union(uni.begin(), uni.end());
+	std::sort(sorted_union.begin(), sorted_union.end());
+	for (int idx : sorted_union) {
+		out.push_back(idx);
+	}
+	return out;
+}
+
+int BrushForgeNative::pick_vertex_screen(
+	const PackedVector2Array &screen_positions,
+	const Vector2 &mouse_pos,
+	float threshold) const {
+	if (screen_positions.is_empty()) {
+		return -1;
+	}
+	int best_idx = -1;
+	float best_d = std::numeric_limits<float>::infinity();
+	for (int i = 0; i < screen_positions.size(); i++) {
+		const float d = screen_positions[i].distance_to(mouse_pos);
+		if (d < best_d) {
+			best_d = d;
+			best_idx = i;
+		}
+	}
+	if (best_d > threshold) {
+		return -1;
+	}
+	return best_idx;
+}
+
+Dictionary BrushForgeNative::pick_edge_screen(
+	const PackedVector2Array &screen_positions,
+	const Array &edges,
+	const Vector2 &mouse_pos,
+	float threshold) const {
+	Dictionary out;
+	if (screen_positions.size() < 2 || edges.is_empty()) {
+		return out;
+	}
+	float best_d = std::numeric_limits<float>::infinity();
+	int best_a = -1;
+	int best_b = -1;
+	for (int i = 0; i < edges.size(); i++) {
+		Variant ev = edges[i];
+		if (ev.get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary e = ev;
+		const int a = (int)(int64_t)e.get("a", -1);
+		const int b = (int)(int64_t)e.get("b", -1);
+		if (a < 0 || b < 0 || a >= screen_positions.size() || b >= screen_positions.size()) {
+			continue;
+		}
+		const float d = distance_to_segment_2d(mouse_pos, screen_positions[a], screen_positions[b]);
+		if (d < best_d) {
+			best_d = d;
+			best_a = a;
+			best_b = b;
+		}
+	}
+	if (best_a < 0 || best_b < 0 || best_d > threshold) {
+		return out;
+	}
+	out["a"] = best_a;
+	out["b"] = best_b;
 	return out;
 }
 
