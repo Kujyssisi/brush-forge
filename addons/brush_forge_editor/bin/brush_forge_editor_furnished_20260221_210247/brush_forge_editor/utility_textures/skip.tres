@@ -1,8 +1,0 @@
-[gd_resource type="StandardMaterial3D" format=3 uid="uid://wvj0cftej4el"]
-
-[ext_resource type="Texture2D" uid="uid://car2j11qh0vma" path="res://addons/brush_forge_editor/utility_textures/Textures/skip.png" id="1_c403w"]
-
-[resource]
-transparency = 1
-albedo_color = Color(1, 1, 1, 0.5882353)
-albedo_texture = ExtResource("1_c403w")

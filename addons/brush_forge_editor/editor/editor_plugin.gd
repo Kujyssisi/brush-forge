@@ -131,6 +131,9 @@ var rotate_drag_active := false
 var rotate_drag_axis := Vector3.UP
 var rotate_drag_center := Vector3.ZERO
 var rotate_drag_start_planes: Array = []
+var rotate_drag_prev_mouse_angle := 0.0
+var rotate_drag_accum_angle := 0.0
+var rotate_drag_has_mouse_angle := false
 
 const DEFAULT_GRID_SIZE := 0.25
 var grid_size := DEFAULT_GRID_SIZE
@@ -145,6 +148,7 @@ const CLICK_DRAG_THRESHOLD := 4.0
 const SURFACE_DRAW_HEIGHT := 1.0
 const ROTATE_RADIANS_PER_PIXEL := 0.012
 const ROTATE_SNAP_RADIANS := 0.2617993878 # 15 degrees
+const ROTATE_RING_HIT_PX := 28.0
 const INVALID_STAMP_POINT := Vector3(1e20, 1e20, 1e20)
 const BAKE_NODE_NAME := "idk map baked"
 const CLIP_MATERIAL_PATH := "res://addons/brush_forge_editor/utility_textures/clip.tres"
@@ -1209,6 +1213,8 @@ func _on_rotate_tool_toggled(enabled: bool) -> void:
 	if not enabled:
 		rotate_drag_active = false
 		rotate_drag_start_planes.clear()
+		rotate_drag_accum_angle = 0.0
+		rotate_drag_has_mouse_angle = false
 
 func _on_paint_tool_toggled(enabled: bool) -> void:
 	if not plugin_active and enabled:
@@ -2168,9 +2174,9 @@ func _handle_forward_mouse_motion_event(camera: Camera3D, mm: InputEventMouseMot
 				_begin_history_action("structure" if pending_click_ctrl_drag_clone else "transform", [pending_index])
 				var pending_mesh := pending_click_pick.get("mesh", null)
 				if pending_mesh is MeshInstance3D:
-					_select_brush(pending_mesh as MeshInstance3D, pending_index)
+					_select_brush(pending_mesh as MeshInstance3D, pending_index, pending_click_ctrl_drag_clone)
 				_clear_face_selection()
-				_begin_move_drag(camera, pending_click_mouse, pending_click_alt, pending_click_ctrl_drag_clone, pending_click_ctrl_drag_clone)
+				_begin_move_drag(camera, pending_click_mouse, pending_click_alt, pending_click_ctrl_drag_clone, false)
 				return AFTER_GUI_INPUT_STOP
 	if surface_draw_active:
 		_update_surface_draw(camera, mm.position)
@@ -2763,41 +2769,66 @@ func _handle_rotate_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButto
 	if mb.button_index != MOUSE_BUTTON_LEFT:
 		return AFTER_GUI_INPUT_PASS
 	if mb.pressed:
+		var axis_override := _pick_rotate_axis(camera, mb.position)
+		if axis_override.length() > 0.0 and selected_brush_index >= 0:
+			_begin_history_action("transform", [selected_brush_index])
+			if not _begin_rotate_drag(-1, camera, mb.position, axis_override):
+				_end_history_action()
+			return AFTER_GUI_INPUT_STOP
+		if selected_brush_index >= 0:
+			# If the user is in rotate mode with a selected brush, prefer gizmo rotation
+			# even when strict ring hit misses.
+			var closest_axis := _pick_rotate_axis(camera, mb.position, true)
+			if closest_axis.length() > 0.0:
+				_begin_history_action("transform", [selected_brush_index])
+				if not _begin_rotate_drag(-1, camera, mb.position, closest_axis):
+					_end_history_action()
+				return AFTER_GUI_INPUT_STOP
 		var pick := _pick_brush_and_face(camera, mb.position)
 		if pick.is_empty():
 			return AFTER_GUI_INPUT_STOP
 		_select_brush(pick["mesh"] as MeshInstance3D, int(pick["index"]))
-		var axis_override := _pick_rotate_axis(camera, mb.position)
-		_begin_history_action()
-		_begin_rotate_drag(int(pick["face_index"]), mb.position, axis_override)
+		axis_override = _pick_rotate_axis(camera, mb.position)
+		_begin_history_action("transform", [selected_brush_index])
+		if not _begin_rotate_drag(int(pick["face_index"]), camera, mb.position, axis_override):
+			_end_history_action()
 	else:
 		if rotate_drag_active:
 			_end_history_action()
 		rotate_drag_active = false
 		rotate_drag_start_planes.clear()
+		rotate_drag_accum_angle = 0.0
+		rotate_drag_has_mouse_angle = false
 		_update_gizmos()
 	return AFTER_GUI_INPUT_STOP
 
-func _begin_rotate_drag(face_index: int, mouse_pos: Vector2, axis_override: Vector3 = Vector3.ZERO) -> void:
+func _begin_rotate_drag(face_index: int, camera: Camera3D, mouse_pos: Vector2, axis_override: Vector3 = Vector3.ZERO) -> bool:
 	if selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size():
-		return
+		return false
 	var brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
 	if brush == null:
-		return
+		return false
 	rotate_drag_active = true
 	drag_start_mouse = mouse_pos
 	rotate_drag_center = brush.position
 	rotate_drag_start_planes = _clone_plane_array(brush.planes)
+	rotate_drag_accum_angle = 0.0
+	rotate_drag_has_mouse_angle = false
 	if axis_override.length() > 0.0:
 		rotate_drag_axis = axis_override.normalized()
-		return
-	match face_index:
-		0, 1:
-			rotate_drag_axis = Vector3.RIGHT
-		2, 3:
-			rotate_drag_axis = Vector3.UP
-		_:
-			rotate_drag_axis = Vector3.BACK
+	else:
+		match face_index:
+			0, 1:
+				rotate_drag_axis = Vector3.RIGHT
+			2, 3:
+				rotate_drag_axis = Vector3.UP
+			_:
+				rotate_drag_axis = Vector3.BACK
+	var start_angle = _rotation_mouse_angle_around_axis(camera, mouse_pos, rotate_drag_center, rotate_drag_axis)
+	if start_angle is float:
+		rotate_drag_prev_mouse_angle = float(start_angle)
+		rotate_drag_has_mouse_angle = true
+	return true
 
 func _update_rotate_drag(camera: Camera3D, mouse_pos: Vector2) -> void:
 	if not rotate_drag_active:
@@ -2813,13 +2844,29 @@ func _update_rotate_drag(camera: Camera3D, mouse_pos: Vector2) -> void:
 	var mesh := meshes[selected_brush_index]
 	if mesh == null:
 		return
-	var screen_delta := mouse_pos - drag_start_mouse
-	var axis_sign := 1.0
-	if rotate_drag_axis == Vector3.RIGHT:
-		axis_sign = -1.0
-	elif rotate_drag_axis == Vector3.BACK:
-		axis_sign = -1.0
-	var raw_angle: float = (screen_delta.x + screen_delta.y * 0.35) * ROTATE_RADIANS_PER_PIXEL * axis_sign
+	var raw_angle := rotate_drag_accum_angle
+	var current_angle = _rotation_mouse_angle_around_axis(camera, mouse_pos, rotate_drag_center, rotate_drag_axis)
+	if current_angle is float:
+		var curr := float(current_angle)
+		if rotate_drag_has_mouse_angle:
+			var delta := curr - rotate_drag_prev_mouse_angle
+			if delta > PI:
+				delta -= TAU
+			elif delta < -PI:
+				delta += TAU
+			rotate_drag_accum_angle += delta
+			raw_angle = rotate_drag_accum_angle
+		rotate_drag_prev_mouse_angle = curr
+		rotate_drag_has_mouse_angle = true
+	elif not rotate_drag_has_mouse_angle:
+		# Fallback when projected ring angle is not available (edge-on camera).
+		var screen_delta := mouse_pos - drag_start_mouse
+		var axis_sign := 1.0
+		if rotate_drag_axis == Vector3.RIGHT:
+			axis_sign = -1.0
+		elif rotate_drag_axis == Vector3.BACK:
+			axis_sign = -1.0
+		raw_angle = (screen_delta.x + screen_delta.y * 0.35) * ROTATE_RADIANS_PER_PIXEL * axis_sign
 	var angle: float = float(round(raw_angle / ROTATE_SNAP_RADIANS)) * ROTATE_SNAP_RADIANS
 	var rot_basis := Basis(rotate_drag_axis.normalized(), angle)
 	_restore_brush_planes_from_snapshot(brush, rotate_drag_start_planes)
@@ -2831,6 +2878,8 @@ func _update_rotate_drag(camera: Camera3D, mouse_pos: Vector2) -> void:
 		var n1 := (rot_basis * n0).normalized()
 		var d1 := src.distance + n1.dot(rotate_drag_center) - n0.dot(rotate_drag_center)
 		brush.planes[i] = NeoPlane.new(n1, d1)
+	if EDITOR_BRUSH_PICK_UTILS_SCRIPT != null:
+		EDITOR_BRUSH_PICK_UTILS_SCRIPT.invalidate_brush_pick_cache(brush)
 	var rotated_vertices := _get_brush_vertices_world(brush)
 	if rotated_vertices.size() < 4:
 		_restore_brush_planes_from_snapshot(brush, rotate_drag_start_planes)
@@ -2840,7 +2889,7 @@ func _update_rotate_drag(camera: Camera3D, mouse_pos: Vector2) -> void:
 	_refresh_brush_bounds_from_planes(brush, mesh)
 	_update_gizmos()
 
-func _pick_rotate_axis(camera: Camera3D, mouse_pos: Vector2) -> Vector3:
+func _pick_rotate_axis(camera: Camera3D, mouse_pos: Vector2, force_closest: bool = false) -> Vector3:
 	if selected_mesh == null:
 		return Vector3.ZERO
 	var b := GIZMO_SHAPE_BUILDER_SCRIPT.mesh_bounds_world(selected_mesh)
@@ -2848,20 +2897,78 @@ func _pick_rotate_axis(camera: Camera3D, mouse_pos: Vector2) -> Vector3:
 	var half_size: Vector3 = b["half_size"]
 	var radius := maxf(maxf(half_size.x, half_size.y), half_size.z) * 1.25
 	radius = maxf(radius, grid_size)
-	var screen_center := camera.unproject_position(center)
 	var best_axis := Vector3.ZERO
 	var best_dist := INF
 	var axes := [Vector3.RIGHT, Vector3.UP, Vector3.BACK]
 	for axis in axes:
-		var tip := camera.unproject_position(center + axis * radius)
-		var nearest := Geometry2D.get_closest_point_to_segment(mouse_pos, screen_center, tip)
-		var d := nearest.distance_to(mouse_pos)
+		var d: float = _screen_distance_to_projected_ring(camera, mouse_pos, center, axis, radius, 72)
 		if d < best_dist:
 			best_dist = d
 			best_axis = axis
-	if best_dist <= 18.0:
+	if force_closest or best_dist <= ROTATE_RING_HIT_PX:
 		return best_axis
 	return Vector3.ZERO
+
+func _screen_distance_to_projected_ring(
+	camera: Camera3D,
+	mouse_pos: Vector2,
+	center: Vector3,
+	normal: Vector3,
+	radius: float,
+	segments: int = 64
+) -> float:
+	var axis_n := normal.normalized()
+	if axis_n.length() <= 0.0001:
+		return INF
+	var tangent := axis_n.cross(Vector3.UP)
+	if tangent.length() <= 0.0001:
+		tangent = axis_n.cross(Vector3.RIGHT)
+	if tangent.length() <= 0.0001:
+		return INF
+	tangent = tangent.normalized()
+	var bitangent := axis_n.cross(tangent).normalized()
+	var best := INF
+	var prev_screen := Vector2.ZERO
+	var has_prev := false
+	for i in range(segments + 1):
+		var a := TAU * float(i) / float(segments)
+		var world_pt := center + (tangent * cos(a) + bitangent * sin(a)) * radius
+		var screen_pt := camera.unproject_position(world_pt)
+		if has_prev:
+			var nearest := Geometry2D.get_closest_point_to_segment(mouse_pos, prev_screen, screen_pt)
+			var d := nearest.distance_to(mouse_pos)
+			if d < best:
+				best = d
+		prev_screen = screen_pt
+		has_prev = true
+	return best
+
+func _rotation_mouse_angle_around_axis(camera: Camera3D, mouse_pos: Vector2, center: Vector3, axis: Vector3) -> Variant:
+	if selected_mesh == null:
+		return null
+	var axis_n := axis.normalized()
+	if axis_n.length() <= 0.0001:
+		return null
+	var ref_world := axis_n.cross(Vector3.UP)
+	if ref_world.length() <= 0.0001:
+		ref_world = axis_n.cross(Vector3.RIGHT)
+	if ref_world.length() <= 0.0001:
+		return null
+	ref_world = ref_world.normalized()
+	var b := GIZMO_SHAPE_BUILDER_SCRIPT.mesh_bounds_world(selected_mesh)
+	var half_size: Vector3 = b["half_size"]
+	var radius := maxf(maxf(half_size.x, half_size.y), half_size.z) * 1.25
+	radius = maxf(radius, grid_size)
+	var screen_center := camera.unproject_position(center)
+	var ref_screen_vec := camera.unproject_position(center + ref_world * radius) - screen_center
+	var mouse_vec := mouse_pos - screen_center
+	if ref_screen_vec.length() <= 1.0 or mouse_vec.length() <= 1.0:
+		return null
+	var ref_n := ref_screen_vec.normalized()
+	var mouse_n := mouse_vec.normalized()
+	var dot_v := clampf(ref_n.dot(mouse_n), -1.0, 1.0)
+	var det := ref_n.x * mouse_n.y - ref_n.y * mouse_n.x
+	return atan2(det, dot_v)
 
 func _begin_vertex_drag(camera: Camera3D, mouse_pos: Vector2, alt_pressed: bool, start_anchor: Vector3) -> void:
 	if selected_brush_index < 0 or selected_brush_index >= map_node.brush_data.size():
@@ -3212,6 +3319,8 @@ func _refresh_brush_bounds_from_planes(brush: BrushForge, mesh: MeshInstance3D) 
 	brush.size = size_raw
 	mesh.position = brush.position
 	mesh.mesh = _build_brush_mesh(brush)
+	if EDITOR_BRUSH_PICK_UTILS_SCRIPT != null:
+		EDITOR_BRUSH_PICK_UTILS_SCRIPT.invalidate_brush_pick_cache(brush)
 
 func _begin_brush_rect_draw(face_index: int, hit: Vector3) -> void:
 	brush_draw_has_rect = false
@@ -4008,6 +4117,8 @@ func _clear_selection() -> void:
 	vertex_drag_plane_vertex_indices.clear()
 	rotate_drag_active = false
 	rotate_drag_start_planes.clear()
+	rotate_drag_accum_angle = 0.0
+	rotate_drag_has_mouse_angle = false
 	paint_drag_active = false
 	paint_hover_valid = false
 	paint_last_stamp = INVALID_STAMP_POINT
@@ -4388,7 +4499,7 @@ func _begin_history_action(mode: String = "full", indices: Array[int] = []) -> v
 		pending_transform_undo_state = _capture_transform_state(pending_transform_indices)
 		pending_undo_state = []
 	elif history_action_mode == "structure":
-		pending_undo_state = _capture_map_state(false)
+		pending_undo_state = _capture_map_state(true)
 		pending_transform_undo_state = []
 		pending_transform_indices = []
 		pending_brush_undo_state = {}
@@ -4433,7 +4544,7 @@ func _end_history_action() -> void:
 			undo_redo_t.add_undo_method(self, "_restore_transform_state", undo_state)
 			undo_redo_t.commit_action()
 	elif history_action_mode == "structure":
-		var current_structure_state := _capture_map_state(false)
+		var current_structure_state := _capture_map_state(true)
 		if not EDITOR_STATE_UTILS_SCRIPT.structure_states_equal(pending_undo_state, current_structure_state):
 			var undo_state_s_var = _clone_state_for_history_or_null(pending_undo_state, "structure.undo")
 			var do_state_s_var = _clone_state_for_history_or_null(current_structure_state, "structure.do")
@@ -4515,14 +4626,18 @@ func _end_history_action() -> void:
 
 func _clone_state_for_history_or_null(source: Array, context: String) -> Variant:
 	var cloned = EDITOR_STATE_UTILS_SCRIPT.clone_state(source)
-	if not (cloned is Array):
-		_report_native_runtime_error_once("clone_state", "non-array clone result in %s" % context)
+	if cloned is Array:
+		var clone_arr_native: Array = cloned
+		if source.size() == clone_arr_native.size() and _is_history_state_valid(clone_arr_native):
+			return clone_arr_native
+		_report_native_runtime_error_once("clone_state", "invalid native clone in %s (src=%s clone=%s), using gd deep clone" % [context, source.size(), clone_arr_native.size()])
+	else:
+		_report_native_runtime_error_once("clone_state", "non-array clone result in %s, using gd deep clone" % context)
+	var clone_arr_gd: Array = source.duplicate(true)
+	if source.size() != clone_arr_gd.size() or not _is_history_state_valid(clone_arr_gd):
+		_report_native_runtime_error_once("clone_state", "gd deep clone invalid in %s (src=%s clone=%s)" % [context, source.size(), clone_arr_gd.size()])
 		return null
-	var clone_arr: Array = cloned
-	if source.size() != clone_arr.size():
-		_report_native_runtime_error_once("clone_state", "size mismatch in %s (src=%s clone=%s)" % [context, source.size(), clone_arr.size()])
-		return null
-	return clone_arr
+	return clone_arr_gd
 
 func goto_history_end_cleanup() -> void:
 	_queue_map_sync_from_scene()
@@ -4774,6 +4889,12 @@ func _capture_map_state(deep_copy_metadata: bool = true) -> Array:
 func _restore_map_state(state: Array) -> void:
 	if map_node == null:
 		return
+	if state.is_empty() and map_node.brush_data.size() > 0:
+		_report_native_runtime_error_once("restore_map_state", "refused empty restore over non-empty map (undo safety)")
+		return
+	if not _is_history_state_valid(state):
+		_report_native_runtime_error_once("restore_map_state", "refused invalid state payload (undo safety)")
+		return
 	# On normal edit commit, UndoRedo immediately runs "do" with the current state.
 	# Rebuilding in that case can desync editor refs and make brushes appear to vanish.
 	var current_state := _capture_map_state(false)
@@ -4817,14 +4938,13 @@ func _restore_map_state(state: Array) -> void:
 		brush.face_subdivisions = face_subdivisions.duplicate(true)
 		brush.lock_uvs = bool(item.get("lock_uvs", false))
 		var mi := MeshInstance3D.new()
-		# Build heavy brush meshes incrementally to avoid freezing the editor on big restore/undo.
-		mi.mesh = null
+		# Ensure restored brushes are always visible immediately after undo/redo.
+		mi.mesh = _build_brush_mesh(brush)
 		mi.position = pos
 		mi.set_meta(EDIT_LOCK_META, true)
 		map_node.add_brush(brush, mi, false)
-		_queue_mesh_rebuild_for_brush(map_node.brush_data.size() - 1, true)
 	_invalidate_brush_mesh_cache()
-	_flush_pending_mesh_rebuilds(MAX_MESH_REBUILDS_PER_IDLE)
+	_flush_pending_mesh_rebuilds(pending_mesh_rebuild_indices.size())
 	map_node.sync_data_from_scene()
 	var rebuilt_meshes := _get_brush_meshes()
 	if previous_selected_index >= 0 and previous_selected_index < rebuilt_meshes.size():
@@ -4835,6 +4955,28 @@ func _restore_map_state(state: Array) -> void:
 				_select_face(previous_face_index)
 			return
 	_clear_selection()
+
+func _is_history_state_valid(state: Array) -> bool:
+	for item in state:
+		if not (item is Dictionary):
+			return false
+		var dict_item: Dictionary = item
+		if not dict_item.has("position") or not dict_item.has("size") or not dict_item.has("planes"):
+			return false
+		if not (dict_item["position"] is Vector3) or not (dict_item["size"] is Vector3):
+			return false
+		var planes: Array = dict_item.get("planes", [])
+		if not (planes is Array):
+			return false
+		for p in planes:
+			if not (p is Dictionary):
+				return false
+			var pd: Dictionary = p
+			if not pd.has("normal") or not pd.has("distance"):
+				return false
+			if not (pd["normal"] is Vector3):
+				return false
+	return true
 
 func _try_restore_map_state_in_place(state: Array, previous_selected_index: int, previous_face_index: int) -> bool:
 	if map_node == null:
@@ -4906,9 +5048,9 @@ func _try_restore_map_state_in_place(state: Array, previous_selected_index: int,
 		brush.face_subdivisions = target_face_subdivisions.duplicate(true)
 		brush.lock_uvs = target_lock_uvs
 		mesh.position = target_position
-		if geometry_changed:
+		if geometry_changed or mesh.mesh == null:
 			_queue_mesh_rebuild_for_brush(i)
-	_flush_pending_mesh_rebuilds()
+	_flush_pending_mesh_rebuilds(pending_mesh_rebuild_indices.size())
 	map_node.sync_data_from_scene()
 	if previous_selected_index >= 0 and previous_selected_index < meshes.size():
 		var selected := meshes[previous_selected_index]

@@ -51,7 +51,10 @@ static func build_rotate_rings_mesh(
 		var material: Material = ring["material"]
 		if active_axis.length() > 0.0 and axis.dot(active_axis.normalized()) > 0.99:
 			material = rotate_active_material
-		_append_ring_segments(verts, center, axis, radius, 48)
+		# Draw three concentric line rings to make handles visually thicker/easier to grab.
+		_append_ring_segments(verts, center, axis, radius * 0.965, 56)
+		_append_ring_segments(verts, center, axis, radius, 56)
+		_append_ring_segments(verts, center, axis, radius * 1.035, 56)
 		var arr := []
 		arr.resize(Mesh.ARRAY_MAX)
 		arr[Mesh.ARRAY_VERTEX] = verts

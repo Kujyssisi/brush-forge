@@ -8,7 +8,7 @@ OUT_DIR="$ADDON_DIR/bin"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 PKG_BASENAME="brush_forge_editor_furnished_${STAMP}"
-STAGE_DIR="$OUT_DIR/$PKG_BASENAME"
+STAGE_DIR="$(mktemp -d)"
 ZIP_PATH="$OUT_DIR/${PKG_BASENAME}.zip"
 TAR_PATH="$OUT_DIR/${PKG_BASENAME}.tar.gz"
 
@@ -20,8 +20,8 @@ echo "[1/3] Building native extension (debug + release)..."
 )
 
 echo "[2/3] Staging furnished addon..."
-rm -rf "$STAGE_DIR" "$ZIP_PATH" "$TAR_PATH"
-mkdir -p "$STAGE_DIR"
+rm -rf "$OUT_DIR"/brush_forge_editor_furnished_* "$ZIP_PATH" "$TAR_PATH"
+mkdir -p "$OUT_DIR" "$STAGE_DIR"
 
 if command -v rsync >/dev/null 2>&1; then
 	rsync -a "$ADDON_DIR/" "$STAGE_DIR/brush_forge_editor/" \
@@ -52,5 +52,5 @@ else
 	echo "Done: $TAR_PATH"
 fi
 
-echo "Staged folder: $STAGE_DIR/brush_forge_editor"
+rm -rf "$STAGE_DIR"
 echo "Excluded: native/brush_forge_native/godot-cpp-godot-4.5-stable"

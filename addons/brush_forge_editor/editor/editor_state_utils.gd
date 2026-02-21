@@ -8,24 +8,48 @@ static func states_equal(a: Array, b: Array) -> bool:
 		var native_eq = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.states_equal(a, b)
 		if native_eq is bool:
 			return native_eq
-	_report_native_error_once("states_equal unavailable: native method failed")
-	return false
+	_report_native_error_once("states_equal unavailable: native method failed; using gd fallback")
+	return a == b
 
 static func structure_states_equal(a: Array, b: Array) -> bool:
 	if EDITOR_STATE_NATIVE_BRIDGE_SCRIPT != null:
 		var native_eq = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.structure_states_equal(a, b)
 		if native_eq is bool:
 			return native_eq
-	_report_native_error_once("structure_states_equal unavailable: native method failed")
-	return false
+	_report_native_error_once("structure_states_equal unavailable: native method failed; using gd fallback")
+	if a.size() != b.size():
+		return false
+	for i in range(a.size()):
+		if not (a[i] is Dictionary) or not (b[i] is Dictionary):
+			return false
+		var ai: Dictionary = a[i]
+		var bi: Dictionary = b[i]
+		if ai.get("position", Vector3.ZERO) != bi.get("position", Vector3.ZERO):
+			return false
+		if ai.get("size", Vector3.ONE) != bi.get("size", Vector3.ONE):
+			return false
+		var ap: Array = ai.get("planes", [])
+		var bp: Array = bi.get("planes", [])
+		if ap.size() != bp.size():
+			return false
+		for j in range(ap.size()):
+			if not (ap[j] is Dictionary) or not (bp[j] is Dictionary):
+				return false
+			var api: Dictionary = ap[j]
+			var bpi: Dictionary = bp[j]
+			if api.get("normal", Vector3.UP) != bpi.get("normal", Vector3.UP):
+				return false
+			if float(api.get("distance", 0.0)) != float(bpi.get("distance", 0.0)):
+				return false
+	return true
 
 static func clone_state(state: Array) -> Array:
 	if EDITOR_STATE_NATIVE_BRIDGE_SCRIPT != null:
 		var native_clone = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.clone_state(state)
 		if native_clone is Array:
 			return native_clone
-	_report_native_error_once("clone_state unavailable: native method failed")
-	return []
+	_report_native_error_once("clone_state unavailable: native method failed; using gd fallback")
+	return state.duplicate(true)
 
 static func _report_native_error_once(msg: String) -> void:
 	if _native_error_once.has(msg):
