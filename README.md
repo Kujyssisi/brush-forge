@@ -50,6 +50,22 @@ BrushForge gives you Quake/TrenchBroom-style brush editing directly in the 3D ed
 2. In Godot: `Project > Project Settings > Plugins`.
 3. Enable **BrushForge Editor**.
 
+## Furnished Addon Package (No `godot-cpp` Copy)
+
+Use this command from repo root:
+
+```bash
+./scripts/package_furnished_addon.sh
+```
+
+It will:
+
+- Build native libraries (`template_debug` + `template_release`)
+- Create a ready-to-drop packaged addon under:
+  - `addons/brush_forge_editor/bin/`
+- Exclude:
+  - `addons/brush_forge_editor/native/brush_forge_native/godot-cpp-godot-4.5-stable`
+
 ## Quick Start
 
 1. Select your scene root and enable the plugin.
@@ -123,3 +139,5 @@ Bake material rules (per face/surface):
 ## Credits
 
 - Plugin: **BrushForge Editor** by `Kujyssisi`
+- Utility `clip` / `skip` texture credit: **funcgodot**
+- Editing workflow/style inspiration credit: **TrenchBroom**
