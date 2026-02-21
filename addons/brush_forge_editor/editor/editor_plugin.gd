@@ -4435,8 +4435,14 @@ func _end_history_action() -> void:
 	elif history_action_mode == "structure":
 		var current_structure_state := _capture_map_state(false)
 		if not EDITOR_STATE_UTILS_SCRIPT.structure_states_equal(pending_undo_state, current_structure_state):
-			var undo_state_s := EDITOR_STATE_UTILS_SCRIPT.clone_state(pending_undo_state)
-			var do_state_s := EDITOR_STATE_UTILS_SCRIPT.clone_state(current_structure_state)
+			var undo_state_s_var = _clone_state_for_history_or_null(pending_undo_state, "structure.undo")
+			var do_state_s_var = _clone_state_for_history_or_null(current_structure_state, "structure.do")
+			if undo_state_s_var == null or do_state_s_var == null:
+				_report_native_runtime_error_once("clone_state", "aborted structure history commit due to invalid clone data")
+				goto_history_end_cleanup()
+				return
+			var undo_state_s: Array = undo_state_s_var
+			var do_state_s: Array = do_state_s_var
 			var undo_redo_s := get_undo_redo()
 			undo_redo_s.create_action("BrushForge Edit")
 			undo_redo_s.add_do_method(self, "_restore_map_state", do_state_s)
@@ -4445,8 +4451,14 @@ func _end_history_action() -> void:
 	elif history_action_mode == "brush_meta":
 		var current_brush_state := _capture_single_brush_state(pending_brush_index)
 		if pending_brush_index >= 0 and not EDITOR_STATE_UTILS_SCRIPT.states_equal([pending_brush_undo_state], [current_brush_state]):
-			var undo_single_arr: Array = EDITOR_STATE_UTILS_SCRIPT.clone_state([pending_brush_undo_state])
-			var do_single_arr: Array = EDITOR_STATE_UTILS_SCRIPT.clone_state([current_brush_state])
+			var undo_single_var = _clone_state_for_history_or_null([pending_brush_undo_state], "brush_meta.undo")
+			var do_single_var = _clone_state_for_history_or_null([current_brush_state], "brush_meta.do")
+			if undo_single_var == null or do_single_var == null:
+				_report_native_runtime_error_once("clone_state", "aborted brush_meta history commit due to invalid clone data")
+				goto_history_end_cleanup()
+				return
+			var undo_single_arr: Array = undo_single_var
+			var do_single_arr: Array = do_single_var
 			var undo_single: Dictionary = undo_single_arr[0] if not undo_single_arr.is_empty() else {}
 			var do_single: Dictionary = do_single_arr[0] if not do_single_arr.is_empty() else {}
 			var undo_redo_b := get_undo_redo()
@@ -4466,8 +4478,16 @@ func _end_history_action() -> void:
 				continue
 			if EDITOR_STATE_UTILS_SCRIPT.states_equal([before_state], [after_state]):
 				continue
-			undo_states[brush_index] = EDITOR_STATE_UTILS_SCRIPT.clone_state([before_state])[0]
-			do_states[brush_index] = EDITOR_STATE_UTILS_SCRIPT.clone_state([after_state])[0]
+			var undo_arr_var = _clone_state_for_history_or_null([before_state], "brush_meta_multi.undo.%s" % brush_index)
+			var do_arr_var = _clone_state_for_history_or_null([after_state], "brush_meta_multi.do.%s" % brush_index)
+			if undo_arr_var == null or do_arr_var == null:
+				continue
+			var undo_arr: Array = undo_arr_var
+			var do_arr: Array = do_arr_var
+			if undo_arr.is_empty() or do_arr.is_empty():
+				continue
+			undo_states[brush_index] = undo_arr[0]
+			do_states[brush_index] = do_arr[0]
 			changed = true
 		if changed:
 			var undo_redo_m := get_undo_redo()
@@ -4478,13 +4498,33 @@ func _end_history_action() -> void:
 	else:
 		var current_state := _capture_map_state()
 		if not EDITOR_STATE_UTILS_SCRIPT.states_equal(pending_undo_state, current_state):
-			var undo_state_f := EDITOR_STATE_UTILS_SCRIPT.clone_state(pending_undo_state)
-			var do_state_f := EDITOR_STATE_UTILS_SCRIPT.clone_state(current_state)
+			var undo_state_f_var = _clone_state_for_history_or_null(pending_undo_state, "full.undo")
+			var do_state_f_var = _clone_state_for_history_or_null(current_state, "full.do")
+			if undo_state_f_var == null or do_state_f_var == null:
+				_report_native_runtime_error_once("clone_state", "aborted full history commit due to invalid clone data")
+				goto_history_end_cleanup()
+				return
+			var undo_state_f: Array = undo_state_f_var
+			var do_state_f: Array = do_state_f_var
 			var undo_redo := get_undo_redo()
 			undo_redo.create_action("BrushForge Edit")
 			undo_redo.add_do_method(self, "_restore_map_state", do_state_f)
 			undo_redo.add_undo_method(self, "_restore_map_state", undo_state_f)
 			undo_redo.commit_action()
+	goto_history_end_cleanup()
+
+func _clone_state_for_history_or_null(source: Array, context: String) -> Variant:
+	var cloned = EDITOR_STATE_UTILS_SCRIPT.clone_state(source)
+	if not (cloned is Array):
+		_report_native_runtime_error_once("clone_state", "non-array clone result in %s" % context)
+		return null
+	var clone_arr: Array = cloned
+	if source.size() != clone_arr.size():
+		_report_native_runtime_error_once("clone_state", "size mismatch in %s (src=%s clone=%s)" % [context, source.size(), clone_arr.size()])
+		return null
+	return clone_arr
+
+func goto_history_end_cleanup() -> void:
 	_queue_map_sync_from_scene()
 	history_action_active = false
 	pending_undo_state = []

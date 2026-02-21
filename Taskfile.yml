@@ -1,0 +1,36 @@
+version: "3"
+
+vars:
+  ADDON_DIR: addons/brush_forge_editor
+  NATIVE_DIR: addons/brush_forge_editor/native/brush_forge_native
+  BIN_DIR: addons/brush_forge_editor/bin
+
+tasks:
+  default:
+    desc: Show available plugin tasks
+    cmds:
+      - task --list
+
+  build-plugin:
+    desc: Build native plugin libraries (debug + release)
+    dir: "{{.NATIVE_DIR}}"
+    cmds:
+      - scons -Q target=template_debug
+      - scons -Q target=template_release
+
+  package-plugin:
+    desc: Build and package furnished addon into bin/
+    deps: [build-plugin]
+    cmds:
+      - ./scripts/package_furnished_addon.sh
+
+  clear-bin:
+    desc: Remove packaged addon artifacts and native .so outputs from bin/
+    cmds:
+      - rm -rf "{{.BIN_DIR}}/brush_forge_editor_furnished_*"
+      - rm -f "{{.BIN_DIR}}/libbrush_forge_native.linux.template_debug.x86_64.so"
+      - rm -f "{{.BIN_DIR}}/libbrush_forge_native.linux.template_release.x86_64.so"
+
+  full-plugin:
+    desc: Clear bin, rebuild, and package furnished addon
+    deps: [clear-bin, package-plugin]

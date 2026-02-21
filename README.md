@@ -4,6 +4,38 @@ A custom **Godot 4** in-editor blockout/brush workflow plugin.
 
 BrushForge gives you Quake/TrenchBroom-style brush editing directly in the 3D editor with tools for face/vertex/edge editing, UV controls, vertex paint, subdivision, and one-click bake to runtime mesh + collision.
 
+## Package Command
+
+Run this from repo root to build and package the furnished addon into `addons/brush_forge_editor/bin/`:
+
+```bash
+./scripts/package_furnished_addon.sh
+```
+
+YAML form:
+
+```yaml
+command: "./scripts/package_furnished_addon.sh"
+```
+
+## Task Commands (`go-task`)
+
+If you use [`go-task`](https://taskfile.dev/), run:
+
+```bash
+go-task build-plugin
+go-task package-plugin
+go-task full-plugin
+go-task clear-bin
+```
+
+What they do:
+
+- `go-task build-plugin`: compile native debug + release libraries
+- `go-task package-plugin`: build + create furnished addon package in `bin/`
+- `go-task full-plugin`: clear `bin/`, then rebuild + package
+- `go-task clear-bin`: remove packaged artifacts and native `.so` files in `bin/`
+
 ## Features
 
 - Brush-based level editing inside Godot editor
@@ -56,6 +88,12 @@ Use this command from repo root:
 
 ```bash
 ./scripts/package_furnished_addon.sh
+```
+
+YAML form:
+
+```yaml
+command: "./scripts/package_furnished_addon.sh"
 ```
 
 It will:
