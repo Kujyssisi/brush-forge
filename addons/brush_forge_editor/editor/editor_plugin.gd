@@ -134,6 +134,8 @@ var grid_size := DEFAULT_GRID_SIZE
 const NUDGE_STEP := 1.0
 const EDIT_LOCK_META := "_edit_lock_"
 const PICK_FALLBACK_RADIUS := 48.0
+const TEXTURE_PICK_SHORTLIST := 12
+const FACE_PICK_SHORTLIST := 20
 const MOVE_SENSITIVITY_XZ_FALLBACK := 0.02
 const MOVE_SENSITIVITY_Y_SCALE := 1.1
 const CLICK_DRAG_THRESHOLD := 4.0
@@ -152,6 +154,9 @@ const PAINT_MODE_SUBTRACT := 3
 const PAINT_MODE_BURN := 4
 const PAINT_APPLY_BRUSH := 0
 const PAINT_APPLY_BUCKET := 1
+const MAX_PAINT_STROKES_PER_FACE := 4096
+const PAINT_STROKE_COMPACT_TARGET := 2048
+const MAX_MESH_REBUILDS_PER_IDLE := 2
 
 var brush_gizmo: MeshInstance3D
 var face_gizmo: MeshInstance3D
@@ -184,7 +189,14 @@ var vertex_all_gizmo_material: StandardMaterial3D
 var vertex_selected_gizmo_material: StandardMaterial3D
 
 var pending_undo_state: Array = []
+var pending_transform_undo_state: Array = []
+var pending_brush_undo_state: Dictionary = {}
+var pending_brush_index := -1
+var pending_multi_brush_undo_states: Dictionary = {}
 var history_action_active := false
+var history_action_mode := "full"
+var pending_transform_indices: Array[int] = []
+var map_sync_queued := false
 var texture_material_paths: Array = []
 var texture_material_names: Array = []
 var texture_preview_cache: Dictionary = {}
@@ -199,6 +211,8 @@ var subdivide_face_cache_key := ""
 var subdivide_face_cache: Array[Vector3] = []
 var subdivide_controls_updating := false
 var pending_mesh_rebuild_indices := {}
+var pending_mesh_flush_scheduled := false
+var texture_copy_drag_active := false
 var uv_controls_updating := false
 var uv_preview_drag_active := false
 var uv_preview_rotate_drag := false
@@ -855,8 +869,8 @@ func _on_add_brush():
 
 	if history_action_active:
 		_end_history_action()
-	_begin_history_action()
-	map_node.add_brush(new_b, mi)
+	_begin_history_action("structure")
+	map_node.add_brush(new_b, mi, false)
 	_invalidate_brush_mesh_cache()
 	_select_brush(mi, map_node.brush_data.size() - 1)
 	var selection := get_editor_interface().get_selection()
@@ -864,7 +878,7 @@ func _on_add_brush():
 		selection.clear()
 		selection.add_node(map_node)
 	_end_history_action()
-	map_node.sync_data_from_scene()
+	_queue_map_sync_from_scene()
 	var after_count := map_node.brush_data.size()
 	if after_count <= before_count:
 		# Hard fallback when UndoRedo or restore flow cancels the add.
@@ -873,10 +887,10 @@ func _on_add_brush():
 		fmi.mesh = _build_brush_mesh(fb)
 		fmi.position = fb.position
 		fmi.set_meta(EDIT_LOCK_META, true)
-		map_node.add_brush(fb, fmi)
+		map_node.add_brush(fb, fmi, false)
 		_invalidate_brush_mesh_cache()
 		_select_brush(fmi, map_node.brush_data.size() - 1)
-		map_node.sync_data_from_scene()
+		_queue_map_sync_from_scene()
 
 func _on_bake_mesh_collision_pressed() -> void:
 	if not _ensure_map_node():
@@ -1344,7 +1358,19 @@ func _set_mesh_vertex_preview(enabled: bool) -> void:
 	if paint_vertex_preview_button != null:
 		if paint_vertex_preview_button.button_pressed != enabled:
 			paint_vertex_preview_button.button_pressed = enabled
-	_rebuild_all_brush_meshes()
+	if map_node == null:
+		return
+	var meshes := _get_brush_meshes()
+	var needs_rebuild := false
+	for i in range(mini(meshes.size(), map_node.brush_data.size())):
+		var mesh := meshes[i]
+		if mesh == null:
+			continue
+		if not BRUSH_MESH_BUILDER_SCRIPT.apply_preview_mode(mesh.mesh, enabled):
+			needs_rebuild = true
+			break
+	if needs_rebuild:
+		_rebuild_all_brush_meshes()
 
 func _paint_from_pick(camera: Camera3D, pick: Dictionary, mouse_pos: Vector2) -> void:
 	var target_index := int(pick.get("index", -1))
@@ -1359,15 +1385,19 @@ func _paint_from_pick(camera: Camera3D, pick: Dictionary, mouse_pos: Vector2) ->
 	var target_mesh := meshes[target_index]
 	if target_mesh == null:
 		return
-	var precise_hit := EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, target_index, camera, mouse_pos)
+	var precise_hit := {}
+	if paint_last_stamp == INVALID_STAMP_POINT:
+		precise_hit = EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, target_index, camera, mouse_pos)
 	var hit: Vector3 = _get_pick_hit_point_from_mouse(camera, pick, mouse_pos)
 	if not precise_hit.is_empty():
 		target_face = int(precise_hit.get("face_index", target_face))
 		var exact_hit = precise_hit.get("hit", hit)
 		if exact_hit is Vector3:
 			hit = exact_hit
-	_select_brush(target_mesh, target_index)
-	_select_face(target_face)
+	if selected_brush_index != target_index or selected_mesh != target_mesh:
+		_select_brush(target_mesh, target_index)
+	if selected_face_index != target_face:
+		_select_face(target_face)
 	var radius := float(paint_radius_spinbox.value) if paint_radius_spinbox != null else 1.0
 	var strength := float(paint_strength_spinbox.value) if paint_strength_spinbox != null else 0.35
 	var col := paint_color_picker.color if paint_color_picker != null else Color.WHITE
@@ -1392,17 +1422,9 @@ func _paint_from_pick(camera: Camera3D, pick: Dictionary, mouse_pos: Vector2) ->
 	_rebuild_painted_brush_mesh(target_index)
 
 func _rebuild_painted_brush_mesh(brush_index: int) -> void:
-	var meshes := _get_brush_meshes()
-	if brush_index < 0 or brush_index >= meshes.size():
-		return
-	if map_node == null or brush_index >= map_node.brush_data.size():
-		return
-	var mesh: MeshInstance3D = meshes[brush_index]
-	var brush: BrushForge = map_node.brush_data[brush_index] as BrushForge
-	if mesh == null or brush == null:
-		return
-	mesh.mesh = _build_brush_mesh(brush)
-	_update_gizmos()
+	_queue_mesh_rebuild_for_brush(brush_index, true)
+	if not paint_drag_active:
+		call_deferred("_update_gizmos")
 
 func _paint_at_world_point(brush_index: int, face_index: int, hit: Vector3, color: Color, radius: float, strength: float, rebuild_mesh: bool = true) -> void:
 	if map_node == null or brush_index < 0 or brush_index >= map_node.brush_data.size():
@@ -1411,6 +1433,9 @@ func _paint_at_world_point(brush_index: int, face_index: int, hit: Vector3, colo
 	if brush == null:
 		return
 	var face_key := str(face_index)
+	var blend_mode := int(paint_blend_mode_option.get_selected_id()) if paint_blend_mode_option != null else PAINT_MODE_NORMAL
+	if blend_mode == PAINT_MODE_NORMAL and color.is_equal_approx(Color.WHITE) and not brush.face_paint_colors.has(face_key):
+		return
 	if not brush.face_paint_strokes.has(face_key):
 		brush.face_paint_strokes[face_key] = []
 	var strokes: Array = brush.face_paint_strokes[face_key]
@@ -1419,13 +1444,31 @@ func _paint_at_world_point(brush_index: int, face_index: int, hit: Vector3, colo
 		"color": color,
 		"radius": maxf(radius, 0.01),
 		"strength": clampf(strength, 0.0, 1.0),
-		"mode": int(paint_blend_mode_option.get_selected_id()) if paint_blend_mode_option != null else PAINT_MODE_NORMAL,
+		"mode": blend_mode,
 	})
-	if strokes.size() > 8192:
-		strokes = strokes.slice(strokes.size() - 8192, strokes.size())
+	if strokes.size() > MAX_PAINT_STROKES_PER_FACE:
+		strokes = _compact_paint_strokes(strokes, PAINT_STROKE_COMPACT_TARGET)
 	brush.face_paint_strokes[face_key] = strokes
 	if rebuild_mesh:
 		_rebuild_painted_brush_mesh(brush_index)
+
+func _compact_paint_strokes(strokes: Array, target_size: int) -> Array:
+	var count := strokes.size()
+	if count <= target_size:
+		return strokes
+	var out: Array = []
+	var keep_recent := mini(int(target_size / 2), target_size)
+	var recent_start := maxi(count - keep_recent, 0)
+	var remaining := maxi(target_size - keep_recent, 0)
+	if remaining > 0 and recent_start > 0:
+		var span := maxi(recent_start, 1)
+		for i in range(remaining):
+			var idx := int(floor(float(i) * float(span) / float(maxi(remaining, 1))))
+			idx = clampi(idx, 0, recent_start - 1)
+			out.append(strokes[idx])
+	for i in range(recent_start, count):
+		out.append(strokes[i])
+	return out
 
 func _read_face_subdivision_xy(brush: BrushForge, face_index: int) -> Dictionary:
 	var out := {"x": 1, "y": 1}
@@ -1481,13 +1524,9 @@ func _apply_subdivide_xy_from_ui(axis: int, value: float) -> void:
 		subdivide_y_spinbox.value = sy
 	if sx == prev_sx and sy == prev_sy:
 		return
-	_begin_history_action()
+	_begin_history_action("brush_meta", [selected_brush_index])
 	_write_face_subdivision_xy(brush, selected_face_index, sx, sy)
-	var meshes := _get_brush_meshes()
-	if selected_brush_index >= 0 and selected_brush_index < meshes.size():
-		var mesh := meshes[selected_brush_index]
-		if mesh != null:
-			mesh.mesh = _build_brush_mesh(brush)
+	_queue_mesh_rebuild_for_brush(selected_brush_index, true)
 	_end_history_action()
 	_update_gizmos()
 
@@ -1574,14 +1613,10 @@ func _apply_uv_controls_to_selected_face() -> void:
 		_begin_history_action()
 		started_here = true
 	brush.face_uv_transforms[face_key] = uv_dict
-	var meshes := _get_brush_meshes()
-	if selected_brush_index >= 0 and selected_brush_index < meshes.size():
-		var mesh := meshes[selected_brush_index]
-		if mesh != null:
-			mesh.mesh = _build_brush_mesh(brush)
+	_queue_mesh_rebuild_for_brush(selected_brush_index, true)
 	if started_here:
 		_end_history_action()
-	_refresh_uv_controls_from_selection()
+	_refresh_uv_preview(uv_dict)
 
 func _refresh_uv_controls_from_selection() -> void:
 	if uv_scale_x_spinbox == null:
@@ -1758,50 +1793,58 @@ func _apply_texture_material_path(material_path: String) -> void:
 	var face_key := str(selected_face_index)
 	if str(brush.face_material_paths.get(face_key, "")) == material_path:
 		return
-	_begin_history_action()
+	_begin_history_action("brush_meta", [selected_brush_index])
 	brush.face_material_paths[face_key] = material_path
 	var meshes := _get_brush_meshes()
 	if selected_brush_index >= 0 and selected_brush_index < meshes.size():
 		var mesh := meshes[selected_brush_index]
 		if mesh != null:
-			mesh.mesh = _build_brush_mesh(brush)
+			if not BRUSH_MESH_BUILDER_SCRIPT.apply_face_material(mesh.mesh, selected_face_index, material_path):
+				_queue_mesh_rebuild_for_brush(selected_brush_index, true)
 	_end_history_action()
-	_sync_texture_list_selection()
+	_sync_texture_list_selection(false)
 	_refresh_uv_controls_from_selection()
 	_update_gizmos()
 
-func _sync_texture_list_selection() -> void:
+func _sync_texture_list_selection(refresh_uv: bool = true) -> void:
 	if texture_list == null:
-		_refresh_uv_controls_from_selection()
+		if refresh_uv:
+			_refresh_uv_controls_from_selection()
 		return
 	if selected_brush_index < 0 or selected_face_index < 0:
 		texture_list.deselect_all()
-		_refresh_uv_controls_from_selection()
+		if refresh_uv:
+			_refresh_uv_controls_from_selection()
 		return
 	if map_node == null or selected_brush_index >= map_node.brush_data.size():
 		texture_list.deselect_all()
-		_refresh_uv_controls_from_selection()
+		if refresh_uv:
+			_refresh_uv_controls_from_selection()
 		return
 	var brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
 	if brush == null:
 		texture_list.deselect_all()
-		_refresh_uv_controls_from_selection()
+		if refresh_uv:
+			_refresh_uv_controls_from_selection()
 		return
 	var face_key := str(selected_face_index)
 	var material_path := str(brush.face_material_paths.get(face_key, ""))
 	if material_path == "":
 		texture_list.deselect_all()
-		_refresh_uv_controls_from_selection()
+		if refresh_uv:
+			_refresh_uv_controls_from_selection()
 		return
 	for i in range(texture_list.get_item_count()):
 		var metadata = texture_list.get_item_metadata(i)
 		if metadata != null and str(metadata) == material_path:
 			texture_list.select(i)
 			texture_list.ensure_current_is_visible()
-			_refresh_uv_controls_from_selection()
+			if refresh_uv:
+				_refresh_uv_controls_from_selection()
 			return
 	texture_list.deselect_all()
-	_refresh_uv_controls_from_selection()
+	if refresh_uv:
+		_refresh_uv_controls_from_selection()
 
 func _handles(object: Object) -> bool:
 	if object is BrushForgeMap:
@@ -1849,7 +1892,7 @@ func _process(_delta: float) -> void:
 func _selection_targets_map() -> bool:
 	var selection := get_editor_interface().get_selection()
 	if selection == null:
-		return false
+		return _is_custom_tool_enabled() and map_node != null and is_instance_valid(map_node)
 	var nodes := selection.get_selected_nodes()
 	for node in nodes:
 		if node is BrushForgeMap:
@@ -1866,6 +1909,8 @@ func _selection_targets_map() -> bool:
 				_invalidate_brush_mesh_cache()
 				_invalidate_subdivide_face_cache()
 			return true
+	if _is_custom_tool_enabled() and map_node != null and is_instance_valid(map_node):
+		return true
 	return false
 
 func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
@@ -1895,12 +1940,27 @@ func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
 func _handle_forward_global_key_event(key_event: InputEventKey) -> int:
 	if not key_event.pressed or key_event.echo:
 		return AFTER_GUI_INPUT_PASS
+	if _is_custom_tool_enabled() and EDITOR_MATH_UTILS_SCRIPT.is_blocked_editor_transform_key(key_event):
+		return AFTER_GUI_INPUT_STOP
 	if key_event.keycode != KEY_DELETE and key_event.keycode != KEY_BACKSPACE:
 		return AFTER_GUI_INPUT_PASS
 	if move_brush_button != null and move_brush_button.button_pressed and _handle_trenchbroom_keybinds(key_event):
 		return AFTER_GUI_INPUT_STOP
 	# Always swallow delete/backspace while editing BrushForge to avoid editor node-delete prompts.
 	return AFTER_GUI_INPUT_STOP
+
+func _shortcut_input(event: InputEvent) -> void:
+	if not plugin_active or not _is_custom_tool_enabled():
+		return
+	if not (event is InputEventKey):
+		return
+	var key_event := event as InputEventKey
+	if not key_event.pressed or key_event.echo:
+		return
+	if key_event.keycode == KEY_DELETE \
+		or key_event.keycode == KEY_BACKSPACE \
+		or EDITOR_MATH_UTILS_SCRIPT.is_blocked_editor_transform_key(key_event):
+		get_viewport().set_input_as_handled()
 
 func _handle_forward_tool_key_event(key_event: InputEventKey) -> int:
 	if not key_event.pressed or key_event.echo:
@@ -1983,7 +2043,7 @@ func _handle_forward_left_mouse_press(camera: Camera3D, mb: InputEventMouseButto
 	if pick.is_empty():
 		if _is_mouse_near_selected_brush(camera, mb.position):
 			if move_brush_button != null and move_brush_button.button_pressed:
-				_begin_history_action()
+				_begin_history_action("structure" if mb.ctrl_pressed else "transform", [selected_brush_index])
 				_begin_move_drag(camera, mb.position, mb.alt_pressed, mb.ctrl_pressed)
 			return AFTER_GUI_INPUT_STOP
 		_clear_selection()
@@ -2011,14 +2071,14 @@ func _handle_forward_left_mouse_press(camera: Camera3D, mb: InputEventMouseButto
 		var face_index := int(pick["face_index"])
 		_select_brush(pick_mesh, pick_index)
 		_select_face(face_index)
-		_begin_history_action()
+		_begin_history_action("full" if mb.ctrl_pressed else "transform", [pick_index])
 		_begin_face_drag(mb.position, face_index, mb.ctrl_pressed)
 		return AFTER_GUI_INPUT_STOP
 
 	var preserve_multi := _is_brush_selected(pick_index)
 	_select_brush(pick_mesh, pick_index, preserve_multi)
 	_clear_face_selection()
-	_begin_history_action()
+	_begin_history_action("structure" if mb.ctrl_pressed else "transform", _get_selected_indices())
 	_begin_move_drag(camera, mb.position, mb.alt_pressed, mb.ctrl_pressed)
 	return AFTER_GUI_INPUT_STOP
 
@@ -2067,7 +2127,7 @@ func _handle_forward_mouse_motion_event(camera: Camera3D, mm: InputEventMouseMot
 		if mm.position.distance_to(pending_click_mouse) > CLICK_DRAG_THRESHOLD:
 			var pending_index := int(pending_click_pick.get("index", -1))
 			if pending_index >= 0 and pending_index == selected_brush_index:
-				_begin_history_action()
+				_begin_history_action("structure" if pending_click_ctrl_drag_clone else "transform", [pending_index])
 				var pending_mesh := pending_click_pick.get("mesh", null)
 				if pending_mesh is MeshInstance3D:
 					_select_brush(pending_mesh as MeshInstance3D, pending_index)
@@ -2105,10 +2165,18 @@ func _handle_texture_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButt
 	if mb.button_index != MOUSE_BUTTON_LEFT:
 		return AFTER_GUI_INPUT_PASS
 	if not mb.pressed:
-		return AFTER_GUI_INPUT_PASS
+		var handled_texture_release := texture_copy_drag_active
+		if texture_copy_drag_active and history_action_active and history_action_mode == "brush_meta_multi":
+			_end_history_action()
+		texture_copy_drag_active = false
+		return AFTER_GUI_INPUT_STOP if handled_texture_release else AFTER_GUI_INPUT_PASS
 	var src_brush_index := selected_brush_index
 	var src_face_index := selected_face_index
-	var pick := _pick_brush_and_face(camera, mb.position)
+	var pick := _fast_pick_selected_brush_face(camera, mb.position)
+	if pick.is_empty():
+		pick = _pick_texture_face_fast(camera, mb.position)
+	if pick.is_empty():
+		pick = _pick_brush_and_face(camera, mb.position)
 	if pick.is_empty():
 		paint_hover_valid = false
 		_update_gizmos()
@@ -2120,12 +2188,95 @@ func _handle_texture_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButt
 		return AFTER_GUI_INPUT_PASS
 	_select_brush(target_mesh, target_index)
 	_select_face(target_face)
-	_sync_texture_list_selection()
+	_sync_texture_list_selection(false)
 	if mb.alt_pressed and src_brush_index >= 0 and src_face_index >= 0:
+		if not history_action_active:
+			_begin_history_action("brush_meta_multi")
+		texture_copy_drag_active = true
 		var anchor := _get_pick_hit_point_from_mouse(camera, pick, mb.position)
-		_copy_face_texture(src_brush_index, src_face_index, target_index, target_face, anchor)
+		_copy_face_texture(src_brush_index, src_face_index, target_index, target_face, anchor, true)
 		return AFTER_GUI_INPUT_STOP
+	texture_copy_drag_active = false
 	return AFTER_GUI_INPUT_STOP
+
+func _fast_pick_selected_brush_face(camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
+	if map_node == null or selected_brush_index < 0:
+		return {}
+	var meshes := _get_brush_meshes()
+	if selected_brush_index >= meshes.size():
+		return {}
+	var selected := meshes[selected_brush_index]
+	if selected == null:
+		return {}
+	if not _is_mouse_near_selected_brush(camera, mouse_pos):
+		return {}
+	var exact_hit := EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, selected_brush_index, camera, mouse_pos)
+	if exact_hit.is_empty():
+		return {}
+	return {
+		"mesh": selected,
+		"index": selected_brush_index,
+		"face_index": int(exact_hit.get("face_index", -1)),
+		"t": float(exact_hit.get("t", INF)),
+	}
+
+func _pick_texture_face_fast(camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
+	return _pick_brush_and_face_shortlist(camera, mouse_pos, TEXTURE_PICK_SHORTLIST)
+
+func _pick_brush_and_face_shortlist(camera: Camera3D, mouse_pos: Vector2, shortlist: int) -> Dictionary:
+	if map_node == null:
+		return {}
+	var meshes := _get_brush_meshes()
+	if meshes.is_empty():
+		return {}
+	var candidates: Array = []
+	for i in range(mini(meshes.size(), map_node.brush_data.size())):
+		var mesh := meshes[i]
+		if mesh == null:
+			continue
+		var screen_pos := camera.unproject_position(mesh.global_position)
+		var screen_dist := screen_pos.distance_to(mouse_pos)
+		candidates.append({
+			"index": i,
+			"mesh": mesh,
+			"screen_dist": screen_dist,
+		})
+	if candidates.is_empty():
+		return {}
+	candidates.sort_custom(func(a, b): return float(a["screen_dist"]) < float(b["screen_dist"]))
+	var max_exact: int = mini(shortlist, candidates.size())
+	var best_t: float = INF
+	var best_face: int = -1
+	var best_index: int = -1
+	var best_mesh: MeshInstance3D = null
+	for ci in range(max_exact):
+		var cand: Dictionary = candidates[ci]
+		var idx := int(cand["index"])
+		var exact_hit := EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, idx, camera, mouse_pos)
+		if exact_hit.is_empty():
+			continue
+		var t := float(exact_hit.get("t", INF))
+		if t < best_t:
+			best_t = t
+			best_face = int(exact_hit.get("face_index", -1))
+			best_index = idx
+			best_mesh = cand["mesh"] as MeshInstance3D
+	if best_mesh != null and best_index >= 0 and best_face >= 0:
+		return {
+			"mesh": best_mesh,
+			"index": best_index,
+			"face_index": best_face,
+			"t": best_t,
+		}
+	var nearest: Dictionary = candidates[0]
+	if float(nearest["screen_dist"]) <= PICK_FALLBACK_RADIUS:
+		return {
+			"mesh": nearest["mesh"],
+			"index": int(nearest["index"]),
+			"face_index": 4,
+			"t": INF,
+		}
+	return {}
 
 func _handle_paint_tool_mouse_button(camera: Camera3D, mb: InputEventMouseButton) -> int:
 	if mb.button_index != MOUSE_BUTTON_LEFT:
@@ -2172,8 +2323,11 @@ func _paint_fill_face(brush_index: int, face_index: int, color: Color) -> void:
 	if brush == null:
 		return
 	var key := str(face_index)
-	brush.face_paint_colors[key] = color
-	brush.face_paint_strokes[key] = []
+	if color.is_equal_approx(Color.WHITE):
+		brush.face_paint_colors.erase(key)
+	else:
+		brush.face_paint_colors[key] = color
+	brush.face_paint_strokes.erase(key)
 	_rebuild_painted_brush_mesh(brush_index)
 
 func _handle_paint_tool_mouse_motion(camera: Camera3D, mm: InputEventMouseMotion) -> int:
@@ -2187,6 +2341,7 @@ func _handle_paint_tool_mouse_motion(camera: Camera3D, mm: InputEventMouseMotion
 	paint_hover_point = hit
 	if paint_drag_active:
 		_paint_from_pick(camera, pick, mm.position)
+		_update_gizmos()
 		return AFTER_GUI_INPUT_STOP
 	_update_gizmos()
 	return AFTER_GUI_INPUT_PASS
@@ -2231,13 +2386,16 @@ func _handle_texture_tool_mouse_motion(camera: Camera3D, mm: InputEventMouseMoti
 	if src_brush_index == target_index and src_face_index == target_face:
 		return AFTER_GUI_INPUT_PASS
 	var anchor := _get_pick_hit_point_from_mouse(camera, pick, mm.position)
+	if not history_action_active:
+		_begin_history_action("brush_meta_multi")
+	texture_copy_drag_active = true
 	_copy_face_texture(src_brush_index, src_face_index, target_index, target_face, anchor)
 	_select_brush(target_mesh, target_index)
 	_select_face(target_face)
-	_sync_texture_list_selection()
+	_sync_texture_list_selection(false)
 	return AFTER_GUI_INPUT_STOP
 
-func _copy_face_texture(src_brush_index: int, src_face_index: int, dst_brush_index: int, dst_face_index: int, anchor_world: Variant = null) -> void:
+func _copy_face_texture(src_brush_index: int, src_face_index: int, dst_brush_index: int, dst_face_index: int, anchor_world: Variant = null, refresh_ui: bool = false) -> void:
 	if map_node == null:
 		return
 	if src_brush_index < 0 or src_brush_index >= map_node.brush_data.size():
@@ -2254,23 +2412,35 @@ func _copy_face_texture(src_brush_index: int, src_face_index: int, dst_brush_ind
 	var dst_mat_key := str(dst_face_index)
 	var src_mat_path := str(src_brush.face_material_paths[src_mat_key])
 	var dst_mat_path := str(dst_brush.face_material_paths.get(dst_mat_key, ""))
-	var src_uv := src_brush.face_uv_transforms.get(src_mat_key, null)
-	var dst_uv = dst_brush.face_uv_transforms.get(dst_mat_key, null)
-	if src_mat_path == dst_mat_path and src_uv == dst_uv:
+	var src_uv = _read_uv_transform_for_face(src_brush, src_face_index)
+	var dst_uv = _read_uv_transform_for_face(dst_brush, dst_face_index)
+	var uv_changed: bool = src_uv != dst_uv
+	var has_anchor: bool = anchor_world is Vector3
+	if src_mat_path == dst_mat_path and src_uv == dst_uv and not has_anchor:
 		return
-	_begin_history_action()
+	var started_here := false
+	if history_action_active and history_action_mode == "brush_meta_multi":
+		_capture_multi_brush_undo_state_if_needed(dst_brush_index)
+	if not history_action_active:
+		_begin_history_action("brush_meta", [dst_brush_index])
+		started_here = true
 	dst_brush.face_material_paths[dst_mat_key] = src_mat_path
-	if src_brush.face_uv_transforms.has(src_mat_key):
-		var copied_uv: Dictionary = src_brush.face_uv_transforms[src_mat_key].duplicate(true)
+	if src_uv is Dictionary:
+		var copied_uv: Dictionary = (src_uv as Dictionary).duplicate(true)
 		dst_brush.face_uv_transforms[dst_mat_key] = _align_copied_uv_transform(src_brush, src_face_index, dst_brush, dst_face_index, copied_uv, anchor_world)
 	var meshes := _get_brush_meshes()
 	if dst_brush_index >= 0 and dst_brush_index < meshes.size():
 		var mesh := meshes[dst_brush_index]
 		if mesh != null:
-			mesh.mesh = _build_brush_mesh(dst_brush)
-	_end_history_action()
-	_refresh_uv_controls_from_selection()
-	_update_gizmos()
+			if not BRUSH_MESH_BUILDER_SCRIPT.apply_face_material(mesh.mesh, dst_face_index, src_mat_path):
+				_queue_mesh_rebuild_for_brush(dst_brush_index, true)
+			elif uv_changed:
+				_queue_mesh_rebuild_for_brush(dst_brush_index, true)
+	if started_here:
+		_end_history_action()
+	if refresh_ui:
+		_refresh_uv_controls_from_selection()
+		_update_gizmos()
 
 func _align_copied_uv_transform(src_brush: BrushForge, src_face_index: int, dst_brush: BrushForge, dst_face_index: int, copied_uv: Dictionary, anchor_world: Variant = null) -> Dictionary:
 	if copied_uv.is_empty():
@@ -2330,6 +2500,36 @@ func _align_copied_uv_transform(src_brush: BrushForge, src_face_index: int, dst_
 	})
 	copied_uv["offset"] = src_anchor_uv - dst_uv_no_offset
 	return copied_uv
+
+func _legacy_axis_face_index_from_normal(normal: Vector3) -> int:
+	var n := normal.normalized()
+	var d_right := n.dot(Vector3.RIGHT)
+	var d_up := n.dot(Vector3.UP)
+	var d_back := n.dot(Vector3.BACK)
+	var ax := absf(d_right)
+	var ay := absf(d_up)
+	var az := absf(d_back)
+	if ax >= ay and ax >= az:
+		return 0 if d_right >= 0.0 else 1
+	if ay >= ax and ay >= az:
+		return 2 if d_up >= 0.0 else 3
+	return 4 if d_back >= 0.0 else 5
+
+func _read_uv_transform_for_face(brush: BrushForge, face_index: int):
+	if brush == null:
+		return null
+	var key := str(face_index)
+	if brush.face_uv_transforms.has(key):
+		return brush.face_uv_transforms[key]
+	if face_index < 0 or face_index >= brush.planes.size():
+		return null
+	var plane: NeoPlane = brush.planes[face_index] as NeoPlane
+	if plane == null:
+		return null
+	var axis_key := str(_legacy_axis_face_index_from_normal(plane.normal))
+	if brush.face_uv_transforms.has(axis_key):
+		return brush.face_uv_transforms[axis_key]
+	return null
 
 func _face_uv_basis_from_brush_face(brush: BrushForge, face_index: int) -> Dictionary:
 	if brush == null or face_index < 0 or face_index >= brush.planes.size():
@@ -3194,15 +3394,16 @@ func _commit_brush_tool_preview() -> bool:
 		return false
 	var center: Vector3 = box["center"]
 	var size: Vector3 = box["size"]
-	_begin_history_action()
+	_begin_history_action("structure")
 	var new_b := BrushForge.create_box(center, size)
 	var mi := MeshInstance3D.new()
 	mi.mesh = _build_brush_mesh(new_b)
 	mi.position = center
 	mi.set_meta(EDIT_LOCK_META, true)
-	map_node.add_brush(new_b, mi)
+	map_node.add_brush(new_b, mi, false)
 	_invalidate_brush_mesh_cache()
 	_select_brush(mi, map_node.brush_data.size() - 1)
+	_queue_map_sync_from_scene()
 	_end_history_action()
 	brush_draw_has_rect = false
 	brush_extrude_depth = 0.0
@@ -3774,6 +3975,10 @@ func _create_extrude_brush_from_selected() -> int:
 	var src: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
 	if src == null:
 		return -1
+	var source_mesh: MeshInstance3D = null
+	var source_meshes := _get_brush_meshes()
+	if selected_brush_index >= 0 and selected_brush_index < source_meshes.size():
+		source_mesh = source_meshes[selected_brush_index]
 	var copy := BrushForge.create_box(src.position, src.size)
 	copy.planes.clear()
 	for p in src.planes:
@@ -3785,54 +3990,22 @@ func _create_extrude_brush_from_selected() -> int:
 	copy.face_subdivisions = src.face_subdivisions.duplicate(true)
 	copy.lock_uvs = src.lock_uvs
 	var mi := MeshInstance3D.new()
-	mi.mesh = _build_brush_mesh(copy)
+	if source_mesh != null:
+		mi.mesh = source_mesh.mesh
+	else:
+		mi.mesh = _build_brush_mesh(copy)
 	mi.position = copy.position
 	mi.set_meta(EDIT_LOCK_META, true)
-	map_node.add_brush(copy, mi)
+	map_node.add_brush(copy, mi, false)
 	_invalidate_brush_mesh_cache()
+	_queue_map_sync_from_scene()
 	return map_node.brush_data.size() - 1
 
 func _pick_brush_and_face(camera: Camera3D, mouse_pos: Vector2) -> Dictionary:
-	var best_t := INF
-	var best_mesh: MeshInstance3D = null
-	var best_index := -1
-	var best_face_index := -1
-	var best_screen_dist := INF
-	var brush_meshes := _get_brush_meshes()
-
-	for i in range(map_node.brush_data.size()):
-		if i >= brush_meshes.size():
-			break
-		var mesh := brush_meshes[i]
-		if mesh == null:
-			continue
-		var exact_hit := EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(map_node, i, camera, mouse_pos)
-		if exact_hit.is_empty():
-			var b := GIZMO_SHAPE_BUILDER_SCRIPT.mesh_bounds_world(mesh)
-			var center: Vector3 = b["center"]
-			var screen_pos := camera.unproject_position(center)
-			var screen_dist := screen_pos.distance_to(mouse_pos)
-			if screen_dist < PICK_FALLBACK_RADIUS and screen_dist < best_screen_dist and best_t == INF:
-				best_screen_dist = screen_dist
-				best_mesh = mesh
-				best_index = i
-				best_face_index = 4
-		else:
-			var t := float(exact_hit["t"])
-			if t < best_t:
-				best_t = t
-				best_mesh = mesh
-				best_index = i
-				best_face_index = int(exact_hit["face_index"])
-
-	if best_mesh == null:
-		return {}
-	return {
-		"mesh": best_mesh,
-		"index": best_index,
-		"face_index": best_face_index,
-		"t": best_t,
-	}
+	var selected_hit := _fast_pick_selected_brush_face(camera, mouse_pos)
+	if not selected_hit.is_empty():
+		return selected_hit
+	return _pick_brush_and_face_shortlist(camera, mouse_pos, FACE_PICK_SHORTLIST)
 
 func _get_pick_hit_point(camera: Camera3D, pick: Dictionary) -> Vector3:
 	var origin := camera.project_ray_origin(pending_click_mouse)
@@ -3857,10 +4030,11 @@ func _begin_surface_draw() -> void:
 	mi.mesh = _build_brush_mesh(new_b)
 	mi.position = init_center
 	mi.set_meta(EDIT_LOCK_META, true)
-	map_node.add_brush(new_b, mi)
+	map_node.add_brush(new_b, mi, false)
 	_invalidate_brush_mesh_cache()
 	surface_draw_brush_index = map_node.brush_data.size() - 1
 	surface_draw_active = true
+	_queue_map_sync_from_scene()
 
 func _update_surface_draw(camera: Camera3D, mouse_pos: Vector2) -> void:
 	if not surface_draw_active:
@@ -3982,6 +4156,8 @@ func _apply_brush_position_by_index(brush_index: int, pos: Vector3) -> void:
 		return
 	var delta: Vector3 = pos - brush.position
 	if delta.length_squared() != 0.0:
+		if EDITOR_BRUSH_PICK_UTILS_SCRIPT != null:
+			EDITOR_BRUSH_PICK_UTILS_SCRIPT.invalidate_brush_pick_cache(brush)
 		for i in range(brush.planes.size()):
 			var plane: NeoPlane = brush.planes[i] as NeoPlane
 			if plane == null:
@@ -3998,13 +4174,21 @@ func _apply_brush_position_by_index(brush_index: int, pos: Vector3) -> void:
 	if brush_index == selected_brush_index:
 		selected_mesh = mesh
 
-func _queue_mesh_rebuild_for_brush(brush_index: int) -> void:
+func _queue_mesh_rebuild_for_brush(brush_index: int, schedule_flush: bool = false) -> void:
 	if brush_index < 0:
 		return
+	if map_node != null and brush_index < map_node.brush_data.size() and EDITOR_BRUSH_PICK_UTILS_SCRIPT != null:
+		var brush: BrushForge = map_node.brush_data[brush_index] as BrushForge
+		if brush != null:
+			EDITOR_BRUSH_PICK_UTILS_SCRIPT.invalidate_brush_pick_cache(brush)
 	pending_mesh_rebuild_indices[brush_index] = true
+	if schedule_flush and not pending_mesh_flush_scheduled:
+		pending_mesh_flush_scheduled = true
+		call_deferred("_flush_pending_mesh_rebuilds")
 
-func _flush_pending_mesh_rebuilds(max_per_call: int = 8) -> void:
+func _flush_pending_mesh_rebuilds(max_per_call: int = MAX_MESH_REBUILDS_PER_IDLE) -> void:
 	if pending_mesh_rebuild_indices.is_empty() or map_node == null:
+		pending_mesh_flush_scheduled = false
 		return
 	var meshes := _get_brush_meshes()
 	var processed := 0
@@ -4022,7 +4206,10 @@ func _flush_pending_mesh_rebuilds(max_per_call: int = 8) -> void:
 		mesh.mesh = _build_brush_mesh(brush)
 		processed += 1
 	if not pending_mesh_rebuild_indices.is_empty():
+		pending_mesh_flush_scheduled = true
 		call_deferred("_flush_pending_mesh_rebuilds")
+	else:
+		pending_mesh_flush_scheduled = false
 
 func _sanitize_brush_face_data(brush: BrushForge) -> void:
 	if brush == null:
@@ -4186,6 +4373,7 @@ func _delete_selected_brush() -> void:
 					map_node.remove_child(mesh_to_remove)
 				mesh_to_remove.queue_free()
 	_invalidate_brush_mesh_cache()
+	_queue_map_sync_from_scene()
 	_clear_selection()
 
 func _duplicate_selected_brush() -> void:
@@ -4196,6 +4384,7 @@ func _duplicate_selected_brushes() -> void:
 		return
 	var src_indices := _get_selected_indices()
 	src_indices.sort()
+	var source_meshes := _get_brush_meshes()
 	var new_indices: Array[int] = []
 	for src_index in src_indices:
 		if src_index < 0 or src_index >= map_node.brush_data.size():
@@ -4214,13 +4403,17 @@ func _duplicate_selected_brushes() -> void:
 		copy.face_subdivisions = src.face_subdivisions.duplicate(true)
 		copy.lock_uvs = src.lock_uvs
 		var mi := MeshInstance3D.new()
-		mi.mesh = _build_brush_mesh(copy)
+		if src_index >= 0 and src_index < source_meshes.size() and source_meshes[src_index] != null:
+			mi.mesh = source_meshes[src_index].mesh
+		else:
+			mi.mesh = _build_brush_mesh(copy)
 		mi.position = copy.position
-		map_node.add_brush(copy, mi)
-		_invalidate_brush_mesh_cache()
+		map_node.add_brush(copy, mi, false)
 		new_indices.append(map_node.brush_data.size() - 1)
 	if new_indices.is_empty():
 		return
+	_invalidate_brush_mesh_cache()
+	_queue_map_sync_from_scene()
 	selected_brush_indices = new_indices.duplicate()
 	var active_new := new_indices[new_indices.size() - 1]
 	if selected_brush_index >= 0:
@@ -4238,7 +4431,7 @@ func _handle_trenchbroom_keybinds(event: InputEventKey) -> bool:
 	if selected_mesh == null or selected_brush_index < 0:
 		return false
 	if event.keycode == KEY_DELETE or event.keycode == KEY_BACKSPACE:
-		_begin_history_action()
+		_begin_history_action("structure")
 		_delete_selected_brush()
 		_end_history_action()
 		return true
@@ -4268,7 +4461,7 @@ func _handle_trenchbroom_keybinds(event: InputEventKey) -> bool:
 		delta.y -= NUDGE_STEP
 
 	if delta != Vector3.ZERO:
-		_begin_history_action()
+		_begin_history_action("structure" if event.ctrl_pressed else "transform", _get_selected_indices())
 		if event.ctrl_pressed:
 			_duplicate_selected_brushes()
 		for idx in _get_selected_indices():
@@ -4305,35 +4498,333 @@ func _apply_editor_selection_lock() -> void:
 	if selection == null:
 		return
 	var selected_nodes := selection.get_selected_nodes()
-	if selected_nodes.size() == 1 and selected_nodes[0] == map_node:
+	if selected_nodes.is_empty():
 		return
 	selection.clear()
-	selection.add_node(map_node)
 
-func _begin_history_action() -> void:
+func _begin_history_action(mode: String = "full", indices: Array[int] = []) -> void:
 	if history_action_active:
 		return
-	pending_undo_state = _capture_map_state()
+	history_action_mode = mode
+	if history_action_mode == "transform":
+		pending_transform_indices = _resolve_transform_history_indices(indices)
+		pending_transform_undo_state = _capture_transform_state(pending_transform_indices)
+		pending_undo_state = []
+	elif history_action_mode == "structure":
+		pending_undo_state = _capture_map_state(false)
+		pending_transform_undo_state = []
+		pending_transform_indices = []
+		pending_brush_undo_state = {}
+		pending_brush_index = -1
+	elif history_action_mode == "brush_meta":
+		var source_indices := indices
+		if source_indices.is_empty() and selected_brush_index >= 0:
+			source_indices = [selected_brush_index]
+		pending_brush_index = int(source_indices[0]) if not source_indices.is_empty() else -1
+		pending_brush_undo_state = _capture_single_brush_state(pending_brush_index)
+		pending_undo_state = []
+		pending_transform_undo_state = []
+		pending_transform_indices = []
+		pending_multi_brush_undo_states = {}
+	elif history_action_mode == "brush_meta_multi":
+		pending_undo_state = []
+		pending_transform_undo_state = []
+		pending_transform_indices = []
+		pending_brush_undo_state = {}
+		pending_brush_index = -1
+		pending_multi_brush_undo_states = {}
+	else:
+		pending_undo_state = _capture_map_state()
+		pending_transform_undo_state = []
+		pending_transform_indices = []
+		pending_brush_undo_state = {}
+		pending_brush_index = -1
+		pending_multi_brush_undo_states = {}
 	history_action_active = true
 
 func _end_history_action() -> void:
 	if not history_action_active:
 		return
-	var current_state := _capture_map_state()
-	if not EDITOR_STATE_UTILS_SCRIPT.states_equal(pending_undo_state, current_state):
-		var undo_state := EDITOR_STATE_UTILS_SCRIPT.clone_state(pending_undo_state)
-		var do_state := EDITOR_STATE_UTILS_SCRIPT.clone_state(current_state)
-		var undo_redo := get_undo_redo()
-		undo_redo.create_action("BrushForge Edit")
-		undo_redo.add_do_method(self, "_restore_map_state", do_state)
-		undo_redo.add_undo_method(self, "_restore_map_state", undo_state)
-		undo_redo.commit_action()
-	if map_node != null:
-		map_node.sync_data_from_scene()
+	if history_action_mode == "transform":
+		var current_transform_state := _capture_transform_state(pending_transform_indices)
+		if not _transform_states_equal(pending_transform_undo_state, current_transform_state):
+			var undo_state := _clone_transform_state(pending_transform_undo_state)
+			var do_state := _clone_transform_state(current_transform_state)
+			var undo_redo_t := get_undo_redo()
+			undo_redo_t.create_action("BrushForge Transform")
+			undo_redo_t.add_do_method(self, "_restore_transform_state", do_state)
+			undo_redo_t.add_undo_method(self, "_restore_transform_state", undo_state)
+			undo_redo_t.commit_action()
+	elif history_action_mode == "structure":
+		var current_structure_state := _capture_map_state(false)
+		if not EDITOR_STATE_UTILS_SCRIPT.structure_states_equal(pending_undo_state, current_structure_state):
+			var undo_state_s := EDITOR_STATE_UTILS_SCRIPT.clone_state(pending_undo_state)
+			var do_state_s := EDITOR_STATE_UTILS_SCRIPT.clone_state(current_structure_state)
+			var undo_redo_s := get_undo_redo()
+			undo_redo_s.create_action("BrushForge Edit")
+			undo_redo_s.add_do_method(self, "_restore_map_state", do_state_s)
+			undo_redo_s.add_undo_method(self, "_restore_map_state", undo_state_s)
+			undo_redo_s.commit_action()
+	elif history_action_mode == "brush_meta":
+		var current_brush_state := _capture_single_brush_state(pending_brush_index)
+		if pending_brush_index >= 0 and not EDITOR_STATE_UTILS_SCRIPT.states_equal([pending_brush_undo_state], [current_brush_state]):
+			var undo_single_arr: Array = EDITOR_STATE_UTILS_SCRIPT.clone_state([pending_brush_undo_state])
+			var do_single_arr: Array = EDITOR_STATE_UTILS_SCRIPT.clone_state([current_brush_state])
+			var undo_single: Dictionary = undo_single_arr[0] if not undo_single_arr.is_empty() else {}
+			var do_single: Dictionary = do_single_arr[0] if not do_single_arr.is_empty() else {}
+			var undo_redo_b := get_undo_redo()
+			undo_redo_b.create_action("BrushForge Texture/UV")
+			undo_redo_b.add_do_method(self, "_restore_single_brush_state", pending_brush_index, do_single)
+			undo_redo_b.add_undo_method(self, "_restore_single_brush_state", pending_brush_index, undo_single)
+			undo_redo_b.commit_action()
+	elif history_action_mode == "brush_meta_multi":
+		var undo_states: Dictionary = {}
+		var do_states: Dictionary = {}
+		var changed: bool = false
+		for key in pending_multi_brush_undo_states.keys():
+			var brush_index := int(key)
+			var before_state: Dictionary = pending_multi_brush_undo_states[key]
+			var after_state: Dictionary = _capture_single_brush_state(brush_index)
+			if before_state.is_empty() and after_state.is_empty():
+				continue
+			if EDITOR_STATE_UTILS_SCRIPT.states_equal([before_state], [after_state]):
+				continue
+			undo_states[brush_index] = EDITOR_STATE_UTILS_SCRIPT.clone_state([before_state])[0]
+			do_states[brush_index] = EDITOR_STATE_UTILS_SCRIPT.clone_state([after_state])[0]
+			changed = true
+		if changed:
+			var undo_redo_m := get_undo_redo()
+			undo_redo_m.create_action("BrushForge Texture/UV")
+			undo_redo_m.add_do_method(self, "_restore_multi_brush_states", do_states)
+			undo_redo_m.add_undo_method(self, "_restore_multi_brush_states", undo_states)
+			undo_redo_m.commit_action()
+	else:
+		var current_state := _capture_map_state()
+		if not EDITOR_STATE_UTILS_SCRIPT.states_equal(pending_undo_state, current_state):
+			var undo_state_f := EDITOR_STATE_UTILS_SCRIPT.clone_state(pending_undo_state)
+			var do_state_f := EDITOR_STATE_UTILS_SCRIPT.clone_state(current_state)
+			var undo_redo := get_undo_redo()
+			undo_redo.create_action("BrushForge Edit")
+			undo_redo.add_do_method(self, "_restore_map_state", do_state_f)
+			undo_redo.add_undo_method(self, "_restore_map_state", undo_state_f)
+			undo_redo.commit_action()
+	_queue_map_sync_from_scene()
 	history_action_active = false
 	pending_undo_state = []
+	pending_transform_undo_state = []
+	pending_transform_indices = []
+	pending_brush_undo_state = {}
+	pending_brush_index = -1
+	pending_multi_brush_undo_states = {}
+	texture_copy_drag_active = false
+	history_action_mode = "full"
 
-func _capture_map_state() -> Array:
+func _capture_multi_brush_undo_state_if_needed(index: int) -> void:
+	if index < 0:
+		return
+	if pending_multi_brush_undo_states.has(index):
+		return
+	pending_multi_brush_undo_states[index] = _capture_single_brush_state(index)
+
+func _capture_single_brush_state(index: int, deep_copy_metadata: bool = true) -> Dictionary:
+	if map_node == null or index < 0 or index >= map_node.brush_data.size():
+		return {}
+	var brush: BrushForge = map_node.brush_data[index] as BrushForge
+	if brush == null:
+		return {}
+	var planes_state: Array = []
+	for p in brush.planes:
+		var plane: NeoPlane = p as NeoPlane
+		if plane == null:
+			continue
+		planes_state.append({
+			"normal": plane.normal,
+			"distance": plane.distance,
+		})
+	return {
+		"position": brush.position,
+		"size": brush.size,
+		"planes": planes_state,
+		"face_material_paths": brush.face_material_paths.duplicate(true) if deep_copy_metadata else brush.face_material_paths,
+		"face_uv_transforms": brush.face_uv_transforms.duplicate(true) if deep_copy_metadata else brush.face_uv_transforms,
+		"face_paint_colors": brush.face_paint_colors.duplicate(true) if deep_copy_metadata else brush.face_paint_colors,
+		"face_paint_strokes": brush.face_paint_strokes.duplicate(true) if deep_copy_metadata else brush.face_paint_strokes,
+		"face_subdivisions": brush.face_subdivisions.duplicate(true) if deep_copy_metadata else brush.face_subdivisions,
+		"lock_uvs": brush.lock_uvs,
+	}
+
+func _restore_single_brush_state(index: int, state: Dictionary) -> void:
+	if map_node == null or index < 0 or index >= map_node.brush_data.size():
+		return
+	var brush: BrushForge = map_node.brush_data[index] as BrushForge
+	if brush == null:
+		return
+	brush.position = state.get("position", brush.position)
+	brush.size = state.get("size", brush.size)
+	brush.planes.clear()
+	var planes_state: Array = state.get("planes", [])
+	for p in planes_state:
+		var normal: Vector3 = p.get("normal", Vector3.UP)
+		var distance: float = float(p.get("distance", 0.0))
+		brush.planes.append(NeoPlane.new(normal, distance))
+	if brush.planes.size() < 4:
+		var rebuilt := BrushForge.create_box(brush.position, brush.size)
+		brush.planes = rebuilt.planes.duplicate()
+	var face_material_paths: Dictionary = state.get("face_material_paths", {})
+	var face_uv_transforms: Dictionary = state.get("face_uv_transforms", {})
+	var face_paint_colors: Dictionary = state.get("face_paint_colors", {})
+	var face_paint_strokes: Dictionary = state.get("face_paint_strokes", {})
+	var face_subdivisions: Dictionary = state.get("face_subdivisions", {})
+	brush.face_material_paths = face_material_paths.duplicate(true)
+	brush.face_uv_transforms = face_uv_transforms.duplicate(true)
+	brush.face_paint_colors = face_paint_colors.duplicate(true)
+	brush.face_paint_strokes = face_paint_strokes.duplicate(true)
+	brush.face_subdivisions = face_subdivisions.duplicate(true)
+	brush.lock_uvs = bool(state.get("lock_uvs", false))
+	var meshes := _get_brush_meshes()
+	if index >= 0 and index < meshes.size():
+		var mesh := meshes[index]
+		if mesh != null:
+			mesh.position = brush.position
+	_queue_mesh_rebuild_for_brush(index, true)
+	_queue_map_sync_from_scene()
+	_update_gizmos()
+	_sync_texture_list_selection(false)
+	_refresh_uv_controls_from_selection()
+
+func _restore_multi_brush_states(states_by_index: Dictionary) -> void:
+	if states_by_index.is_empty():
+		return
+	var keys := states_by_index.keys()
+	keys.sort()
+	for key in keys:
+		var idx := int(key)
+		var state_raw: Variant = states_by_index[key]
+		if state_raw is Dictionary:
+			_restore_single_brush_state(idx, state_raw)
+
+func _resolve_transform_history_indices(indices: Array[int]) -> Array[int]:
+	var source := indices
+	if source.is_empty():
+		source = _get_selected_indices()
+	if source.is_empty() and selected_brush_index >= 0:
+		source = [selected_brush_index]
+	var out: Array[int] = []
+	for idx in source:
+		var i := int(idx)
+		if i < 0 or map_node == null or i >= map_node.brush_data.size():
+			continue
+		if out.find(i) < 0:
+			out.append(i)
+	out.sort()
+	return out
+
+func _capture_transform_state(indices: Array[int]) -> Array:
+	var state: Array = []
+	if map_node == null:
+		return state
+	for i in indices:
+		var brush: BrushForge = map_node.brush_data[i] as BrushForge
+		if brush == null:
+			continue
+		var planes_state: Array = []
+		for p in brush.planes:
+			var plane: NeoPlane = p as NeoPlane
+			if plane == null:
+				continue
+			planes_state.append({
+				"normal": plane.normal,
+				"distance": plane.distance,
+			})
+		state.append({
+			"index": i,
+			"position": brush.position,
+			"size": brush.size,
+			"planes": planes_state,
+		})
+	return state
+
+func _clone_transform_state(state: Array) -> Array:
+	var out: Array = []
+	for item in state:
+		var planes_copy: Array = []
+		var planes_src: Array = item.get("planes", [])
+		for p in planes_src:
+			planes_copy.append({
+				"normal": p.get("normal", Vector3.UP),
+				"distance": float(p.get("distance", 0.0)),
+			})
+		out.append({
+			"index": int(item.get("index", -1)),
+			"position": item.get("position", Vector3.ZERO),
+			"size": item.get("size", Vector3.ONE),
+			"planes": planes_copy,
+		})
+	return out
+
+func _transform_states_equal(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in range(a.size()):
+		var ai = a[i]
+		var bi = b[i]
+		if int(ai.get("index", -1)) != int(bi.get("index", -1)):
+			return false
+		if ai.get("position", Vector3.ZERO) != bi.get("position", Vector3.ZERO):
+			return false
+		if ai.get("size", Vector3.ONE) != bi.get("size", Vector3.ONE):
+			return false
+		var ap: Array = ai.get("planes", [])
+		var bp: Array = bi.get("planes", [])
+		if ap.size() != bp.size():
+			return false
+		for j in range(ap.size()):
+			var api = ap[j]
+			var bpi = bp[j]
+			if api.get("normal", Vector3.ZERO) != bpi.get("normal", Vector3.ZERO):
+				return false
+			if float(api.get("distance", 0.0)) != float(bpi.get("distance", 0.0)):
+				return false
+	return true
+
+func _restore_transform_state(state: Array) -> void:
+	if map_node == null:
+		return
+	var meshes := _get_brush_meshes()
+	for item_raw in state:
+		var item: Dictionary = item_raw
+		var i := int(item.get("index", -1))
+		if i < 0 or i >= map_node.brush_data.size() or i >= meshes.size():
+			continue
+		var brush: BrushForge = map_node.brush_data[i] as BrushForge
+		var mesh: MeshInstance3D = meshes[i]
+		if brush == null or mesh == null:
+			continue
+		var planes_state: Array = item.get("planes", [])
+		brush.planes.clear()
+		for p in planes_state:
+			var normal: Vector3 = p.get("normal", Vector3.UP)
+			var distance: float = float(p.get("distance", 0.0))
+			brush.planes.append(NeoPlane.new(normal, distance))
+		brush.position = item.get("position", brush.position)
+		brush.size = item.get("size", brush.size)
+		mesh.position = brush.position
+		mesh.mesh = _build_brush_mesh(brush)
+	_queue_map_sync_from_scene()
+	_update_gizmos()
+
+func _queue_map_sync_from_scene() -> void:
+	if map_node == null or map_sync_queued:
+		return
+	map_sync_queued = true
+	call_deferred("_flush_map_sync_from_scene")
+
+func _flush_map_sync_from_scene() -> void:
+	map_sync_queued = false
+	if map_node != null:
+		map_node.sync_data_from_scene()
+
+func _capture_map_state(deep_copy_metadata: bool = true) -> Array:
 	var state: Array = []
 	if map_node == null:
 		return state
@@ -4354,11 +4845,11 @@ func _capture_map_state() -> Array:
 			"position": brush.position,
 			"size": brush.size,
 			"planes": planes_state,
-			"face_material_paths": brush.face_material_paths.duplicate(true),
-			"face_uv_transforms": brush.face_uv_transforms.duplicate(true),
-			"face_paint_colors": brush.face_paint_colors.duplicate(true),
-			"face_paint_strokes": brush.face_paint_strokes.duplicate(true),
-			"face_subdivisions": brush.face_subdivisions.duplicate(true),
+			"face_material_paths": brush.face_material_paths.duplicate(true) if deep_copy_metadata else brush.face_material_paths,
+			"face_uv_transforms": brush.face_uv_transforms.duplicate(true) if deep_copy_metadata else brush.face_uv_transforms,
+			"face_paint_colors": brush.face_paint_colors.duplicate(true) if deep_copy_metadata else brush.face_paint_colors,
+			"face_paint_strokes": brush.face_paint_strokes.duplicate(true) if deep_copy_metadata else brush.face_paint_strokes,
+			"face_subdivisions": brush.face_subdivisions.duplicate(true) if deep_copy_metadata else brush.face_subdivisions,
 			"lock_uvs": brush.lock_uvs,
 		})
 	return state
@@ -4368,7 +4859,7 @@ func _restore_map_state(state: Array) -> void:
 		return
 	# On normal edit commit, UndoRedo immediately runs "do" with the current state.
 	# Rebuilding in that case can desync editor refs and make brushes appear to vanish.
-	var current_state := _capture_map_state()
+	var current_state := _capture_map_state(false)
 	if EDITOR_STATE_UTILS_SCRIPT.states_equal(current_state, state):
 		map_node.sync_data_from_scene()
 		return
@@ -4409,12 +4900,14 @@ func _restore_map_state(state: Array) -> void:
 		brush.face_subdivisions = face_subdivisions.duplicate(true)
 		brush.lock_uvs = bool(item.get("lock_uvs", false))
 		var mi := MeshInstance3D.new()
-		mi.mesh = _build_brush_mesh(brush)
+		# Build heavy brush meshes incrementally to avoid freezing the editor on big restore/undo.
+		mi.mesh = null
 		mi.position = pos
 		mi.set_meta(EDIT_LOCK_META, true)
-		map_node.add_brush(brush, mi)
+		map_node.add_brush(brush, mi, false)
+		_queue_mesh_rebuild_for_brush(map_node.brush_data.size() - 1, true)
 	_invalidate_brush_mesh_cache()
-
+	_flush_pending_mesh_rebuilds(MAX_MESH_REBUILDS_PER_IDLE)
 	map_node.sync_data_from_scene()
 	var rebuilt_meshes := _get_brush_meshes()
 	if previous_selected_index >= 0 and previous_selected_index < rebuilt_meshes.size():
@@ -4625,6 +5118,8 @@ func _invalidate_brush_mesh_cache() -> void:
 	brush_meshes_cache.clear()
 	brush_meshes_cache_owner_id = -1
 	brush_meshes_cache_child_count = -1
+	if EDITOR_BRUSH_PICK_UTILS_SCRIPT != null:
+		EDITOR_BRUSH_PICK_UTILS_SCRIPT.invalidate_all_pick_cache()
 
 func _get_brush_meshes() -> Array[MeshInstance3D]:
 	if map_node == null:
@@ -4658,7 +5153,8 @@ func _rebuild_all_brush_meshes() -> void:
 		var brush: BrushForge = map_node.brush_data[i] as BrushForge
 		if mesh == null or brush == null:
 			continue
-		mesh.mesh = _build_brush_mesh(brush)
+		_queue_mesh_rebuild_for_brush(i)
+	_flush_pending_mesh_rebuilds(MAX_MESH_REBUILDS_PER_IDLE)
 
 func _ensure_gizmo_nodes() -> void:
 	if map_node == null:
@@ -5210,12 +5706,7 @@ func _get_selected_brush_face_corners(face_index: int) -> Array[Vector3]:
 	var brush: BrushForge = map_node.brush_data[selected_brush_index] as BrushForge
 	if brush == null or face_index < 0 or face_index >= brush.planes.size():
 		return out
-	var plane: NeoPlane = brush.planes[face_index] as NeoPlane
-	if plane == null:
+	var hull := BRUSH_MESH_BUILDER_SCRIPT.get_brush_face_hull(brush, face_index, 0.02)
+	if hull.is_empty():
 		return out
-	var vertices := _get_selected_mesh_vertices_world()
-	if vertices.is_empty():
-		vertices = _get_brush_vertices_world(brush)
-	if vertices.is_empty():
-		return out
-	return GIZMO_SHAPE_BUILDER_SCRIPT.compute_brush_face_hull(vertices, plane.normal, plane.distance, 0.02)
+	return hull

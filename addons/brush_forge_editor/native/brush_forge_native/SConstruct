@@ -1,0 +1,16 @@
+#!/usr/bin/env python
+import os
+
+env = SConscript("godot-cpp-godot-4.5-stable/SConstruct")
+
+env.Append(CPPPATH=["src/"])
+sources = [
+    "src/brush_forge_native.cpp",
+    "src/register_types.cpp",
+]
+
+library_basename = "brush_forge_native{}{}".format(env["suffix"], env["SHLIBSUFFIX"])
+target_path = os.path.join("..", "..", "bin", library_basename)
+library = env.SharedLibrary(target=target_path, source=sources)
+env.NoCache(library)
+Default(library)

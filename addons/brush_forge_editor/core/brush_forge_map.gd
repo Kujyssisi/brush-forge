@@ -26,19 +26,21 @@ func _bootstrap_from_saved_data() -> void:
 		if not brush_data.is_empty():
 			sync_data_from_scene()
 
-func add_brush(brush, mesh_instance: MeshInstance3D) -> void:
+func add_brush(brush, mesh_instance: MeshInstance3D, sync: bool = true) -> void:
 	brush_data.append(brush)
 	add_child(mesh_instance)
 	mesh_instance.owner = self
-	sync_data_from_scene()
+	if sync:
+		sync_data_from_scene()
 
-func remove_brush(mesh_instance: MeshInstance3D) -> void:
+func remove_brush(mesh_instance: MeshInstance3D, sync: bool = true) -> void:
 	var i = get_children().find(mesh_instance)
 	if i != -1:
 		brush_data.remove_at(i)
 		remove_child(mesh_instance)
 		mesh_instance.queue_free()
-		sync_data_from_scene()
+		if sync:
+			sync_data_from_scene()
 
 func clear_all() -> void:
 	for child in get_children():

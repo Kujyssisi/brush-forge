@@ -57,9 +57,9 @@ func apply_subdivide_xy_from_ui(plugin, axis: int, value: float) -> void:
 		return
 	plugin._begin_history_action()
 	write_face_subdivision_xy(brush, plugin.selected_face_index, sx, sy)
-	var meshes := plugin._get_brush_meshes()
+	var meshes: Array = plugin._get_brush_meshes()
 	if plugin.selected_brush_index >= 0 and plugin.selected_brush_index < meshes.size():
-		var mesh := meshes[plugin.selected_brush_index]
+		var mesh: MeshInstance3D = meshes[plugin.selected_brush_index] as MeshInstance3D
 		if mesh != null:
 			mesh.mesh = plugin._build_brush_mesh(brush)
 	plugin._end_history_action()
@@ -97,14 +97,14 @@ func on_subdivide_lock_xy_toggled(plugin, enabled: bool) -> void:
 func handle_subdivide_tool_mouse_button(plugin, camera: Camera3D, mb: InputEventMouseButton) -> int:
 	if mb.button_index != MOUSE_BUTTON_LEFT or not mb.pressed:
 		return plugin.AFTER_GUI_INPUT_PASS
-	var pick := plugin._pick_brush_and_face(camera, mb.position)
+	var pick: Dictionary = plugin._pick_brush_and_face(camera, mb.position)
 	if pick.is_empty():
 		return plugin.AFTER_GUI_INPUT_PASS
 	var target_mesh := pick["mesh"] as MeshInstance3D
 	var target_index := int(pick["index"])
 	if target_mesh == null or target_index < 0:
 		return plugin.AFTER_GUI_INPUT_PASS
-	var exact_hit := plugin.EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(plugin.map_node, target_index, camera, mb.position)
+	var exact_hit: Dictionary = plugin.EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(plugin.map_node, target_index, camera, mb.position)
 	if exact_hit.is_empty():
 		return plugin.AFTER_GUI_INPUT_PASS
 	var target_face := int(exact_hit.get("face_index", -1))

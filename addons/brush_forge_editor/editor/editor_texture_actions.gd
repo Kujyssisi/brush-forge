@@ -31,9 +31,9 @@ func apply_texture_material_path(plugin, material_path: String) -> void:
 		return
 	plugin._begin_history_action()
 	brush.face_material_paths[face_key] = material_path
-	var meshes := plugin._get_brush_meshes()
+	var meshes: Array = plugin._get_brush_meshes()
 	if plugin.selected_brush_index >= 0 and plugin.selected_brush_index < meshes.size():
-		var mesh := meshes[plugin.selected_brush_index]
+		var mesh: MeshInstance3D = meshes[plugin.selected_brush_index] as MeshInstance3D
 		if mesh != null:
 			mesh.mesh = plugin._build_brush_mesh(brush)
 	plugin._end_history_action()

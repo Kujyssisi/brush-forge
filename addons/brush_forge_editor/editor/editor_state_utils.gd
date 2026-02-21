@@ -1,7 +1,12 @@
 @tool
 extends RefCounted
+const EDITOR_STATE_NATIVE_BRIDGE_SCRIPT = preload("res://addons/brush_forge_editor/editor/editor_state_native_bridge.gd")
 
 static func states_equal(a: Array, b: Array) -> bool:
+	if EDITOR_STATE_NATIVE_BRIDGE_SCRIPT != null:
+		var native_eq = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.states_equal(a, b)
+		if native_eq is bool:
+			return native_eq
 	if a.size() != b.size():
 		return false
 	for i in range(a.size()):
@@ -36,7 +41,38 @@ static func states_equal(a: Array, b: Array) -> bool:
 			return false
 	return true
 
+static func structure_states_equal(a: Array, b: Array) -> bool:
+	if EDITOR_STATE_NATIVE_BRIDGE_SCRIPT != null:
+		var native_eq = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.structure_states_equal(a, b)
+		if native_eq is bool:
+			return native_eq
+	if a.size() != b.size():
+		return false
+	for i in range(a.size()):
+		var ai = a[i]
+		var bi = b[i]
+		if ai["position"] != bi["position"]:
+			return false
+		if ai["size"] != bi["size"]:
+			return false
+		var ap: Array = ai.get("planes", [])
+		var bp: Array = bi.get("planes", [])
+		if ap.size() != bp.size():
+			return false
+		for j in range(ap.size()):
+			var api = ap[j]
+			var bpi = bp[j]
+			if api.get("normal", Vector3.ZERO) != bpi.get("normal", Vector3.ZERO):
+				return false
+			if float(api.get("distance", 0.0)) != float(bpi.get("distance", 0.0)):
+				return false
+	return true
+
 static func clone_state(state: Array) -> Array:
+	if EDITOR_STATE_NATIVE_BRIDGE_SCRIPT != null:
+		var native_clone = EDITOR_STATE_NATIVE_BRIDGE_SCRIPT.clone_state(state)
+		if native_clone is Array:
+			return native_clone
 	var out: Array = []
 	for item in state:
 		var planes_copy: Array = []

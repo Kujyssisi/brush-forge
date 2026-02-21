@@ -1,7 +1,10 @@
 @tool
 extends RefCounted
 class_name BrushMeshBuilder
+const BRUSH_MESH_NATIVE_BRIDGE_SCRIPT = preload("res://addons/brush_forge_editor/mesh/brush_mesh_native_bridge.gd")
 static var use_vertex_color_preview := false
+static var _preview_material: StandardMaterial3D
+static var _material_resource_cache: Dictionary = {}
 const PAINT_MODE_NORMAL := 0
 const PAINT_MODE_ADD := 1
 const PAINT_MODE_MULTIPLY := 2
@@ -40,60 +43,89 @@ static func build_brush_mesh(brush: BrushForge) -> ArrayMesh:
 		brush_center += v
 	brush_center /= float(vertices.size())
 	var face_surfaces: Array = []
-	for face_index in range(planes.size()):
-		var plane: NeoPlane = planes[face_index] as NeoPlane
-		if plane == null:
-			continue
-		var face := _collect_face_vertices(plane, vertices)
-		if face.size() < 3:
-			continue
-		var mat_key := ""
-		if brush.face_material_paths.has(str(face_index)):
-			mat_key = str(brush.face_material_paths[str(face_index)])
-		elif brush.face_material_paths.has(str(_face_index_from_normal(plane.normal))):
-			# Backward compatibility with older 6-face axis keys.
-			mat_key = str(brush.face_material_paths[str(_face_index_from_normal(plane.normal))])
-		var face_color: Color = Color.WHITE
-		# Stored face fill color is the base layer for both bucket and brush strokes.
-		var face_key := str(face_index)
-		var face_strokes: Array = brush.face_paint_strokes.get(face_key, [])
-		if brush.face_paint_colors.has(face_key):
-			face_color = brush.face_paint_colors[str(face_index)]
-		var g_verts := PackedVector3Array()
-		var g_normals := PackedVector3Array()
-		var g_uvs := PackedVector2Array()
-		var g_colors := PackedColorArray()
-		var uv_basis := _uv_basis_from_normal(plane.normal)
-		var u_axis: Vector3 = uv_basis["u"]
-		var v_axis: Vector3 = uv_basis["v"]
-		var face_uv: Dictionary = brush.face_uv_transforms.get(str(face_index), {})
-		if face_uv.is_empty():
-			face_uv = brush.face_uv_transforms.get(str(_face_index_from_normal(plane.normal)), {})
-		var subdiv_xy := _face_subdivision_xy(brush, face_index)
-		var subdiv_x := int(subdiv_xy.get("x", 1))
-		var subdiv_y := int(subdiv_xy.get("y", 1))
-		var paint_accel := _build_paint_stroke_accel(face_strokes)
-		var ordered := _sort_face_vertices(face, plane.normal)
-		_emit_face_grid_tessellation(
-			ordered, plane.normal, subdiv_x, subdiv_y,
-			brush, face_index, face_color, local_origin,
-			u_axis, v_axis, face_uv, paint_accel,
-			g_verts, g_normals, g_uvs, g_colors
-		)
-		if g_verts.size() >= 3:
+	var native_face_surfaces: Array = []
+	if BRUSH_MESH_NATIVE_BRIDGE_SCRIPT != null:
+		native_face_surfaces = BRUSH_MESH_NATIVE_BRIDGE_SCRIPT.build_brush_surfaces(brush, vertices)
+	if native_face_surfaces.size() > 0:
+		for native_surface in native_face_surfaces:
+			if not (native_surface is Dictionary):
+				continue
+			var surface_dict: Dictionary = native_surface
+			var face_index := int(surface_dict.get("face_index", -1))
+			var mat_key := ""
+			if brush.face_material_paths.has(str(face_index)):
+				mat_key = str(brush.face_material_paths[str(face_index)])
+			elif face_index >= 0 and face_index < planes.size():
+				var plane_native: NeoPlane = planes[face_index] as NeoPlane
+				if plane_native != null and brush.face_material_paths.has(str(_face_index_from_normal(plane_native.normal))):
+					mat_key = str(brush.face_material_paths[str(_face_index_from_normal(plane_native.normal))])
 			face_surfaces.append({
-				"verts": g_verts,
-				"normals": g_normals,
-				"uvs": g_uvs,
-				"colors": g_colors,
+				"face_index": face_index,
+				"verts": surface_dict.get("verts", PackedVector3Array()),
+				"normals": surface_dict.get("normals", PackedVector3Array()),
+				"uvs": surface_dict.get("uvs", PackedVector2Array()),
+				"colors": surface_dict.get("colors", PackedColorArray()),
 				"material_path": mat_key,
-				"face_color": face_color,
+				"face_color": Color.WHITE,
 			})
+	else:
+		for face_index in range(planes.size()):
+			var plane: NeoPlane = planes[face_index] as NeoPlane
+			if plane == null:
+				continue
+			var face := _collect_face_vertices(plane, vertices)
+			if face.size() < 3:
+				continue
+			var mat_key := ""
+			if brush.face_material_paths.has(str(face_index)):
+				mat_key = str(brush.face_material_paths[str(face_index)])
+			elif brush.face_material_paths.has(str(_face_index_from_normal(plane.normal))):
+				# Backward compatibility with older 6-face axis keys.
+				mat_key = str(brush.face_material_paths[str(_face_index_from_normal(plane.normal))])
+			var face_color: Color = Color.WHITE
+			# Stored face fill color is the base layer for both bucket and brush strokes.
+			var face_key := str(face_index)
+			var face_strokes: Array = brush.face_paint_strokes.get(face_key, [])
+			if brush.face_paint_colors.has(face_key):
+				face_color = brush.face_paint_colors[str(face_index)]
+			var g_verts := PackedVector3Array()
+			var g_normals := PackedVector3Array()
+			var g_uvs := PackedVector2Array()
+			var g_colors := PackedColorArray()
+			var uv_basis := _uv_basis_from_normal(plane.normal)
+			var u_axis: Vector3 = uv_basis["u"]
+			var v_axis: Vector3 = uv_basis["v"]
+			var face_uv: Dictionary = brush.face_uv_transforms.get(str(face_index), {})
+			if face_uv.is_empty():
+				face_uv = brush.face_uv_transforms.get(str(_face_index_from_normal(plane.normal)), {})
+			var subdiv_xy := _face_subdivision_xy(brush, face_index)
+			var subdiv_x := int(subdiv_xy.get("x", 1))
+			var subdiv_y := int(subdiv_xy.get("y", 1))
+			var paint_accel := _build_paint_stroke_accel(face_strokes)
+			var ordered := _sort_face_vertices(face, plane.normal)
+			_emit_face_grid_tessellation(
+				ordered, plane.normal, subdiv_x, subdiv_y,
+				brush, face_index, face_color, local_origin,
+				u_axis, v_axis, face_uv, paint_accel,
+				g_verts, g_normals, g_uvs, g_colors
+			)
+			if g_verts.size() >= 3:
+				face_surfaces.append({
+					"face_index": face_index,
+					"verts": g_verts,
+					"normals": g_normals,
+					"uvs": g_uvs,
+					"colors": g_colors,
+					"material_path": mat_key,
+					"face_color": face_color,
+				})
 
 	if face_surfaces.size() == 0:
 		return build_box_mesh(brush.size)
 
 	var mesh := ArrayMesh.new()
+	var surface_material_paths: Array = []
+	var surface_face_indices: Array = []
 	for gg in face_surfaces:
 		var tri_verts: PackedVector3Array = gg["verts"]
 		if tri_verts.size() < 3:
@@ -109,21 +141,102 @@ static func build_brush_mesh(brush: BrushForge) -> ArrayMesh:
 		arr[Mesh.ARRAY_COLOR] = tri_colors
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 		var material_path := str(gg.get("material_path", ""))
+		var face_index := int(gg.get("face_index", -1))
+		surface_material_paths.append(material_path)
+		surface_face_indices.append(face_index)
 		var face_color = gg.get("face_color", Color.WHITE)
 		if not (face_color is Color):
 			face_color = Color.WHITE
 		var surf_idx := mesh.get_surface_count() - 1
 		if use_vertex_color_preview:
-			var preview_mat := StandardMaterial3D.new()
-			preview_mat.vertex_color_use_as_albedo = true
-			preview_mat.albedo_color = Color.WHITE
-			preview_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-			mesh.surface_set_material(surf_idx, preview_mat)
+			mesh.surface_set_material(surf_idx, _get_preview_material())
 		elif material_path != "":
-			var mat_res := load(material_path)
+			var mat_res := _load_cached_material(material_path)
 			if mat_res is Material:
 				mesh.surface_set_material(surf_idx, mat_res)
+	mesh.set_meta("_bf_surface_material_paths", surface_material_paths)
+	mesh.set_meta("_bf_surface_face_indices", surface_face_indices)
 	return mesh
+
+static func apply_face_material(mesh_res: Mesh, face_index: int, material_path: String) -> bool:
+	if not (mesh_res is ArrayMesh):
+		return false
+	var mesh := mesh_res as ArrayMesh
+	var surf_count := mesh.get_surface_count()
+	if surf_count <= 0:
+		return false
+	var paths_raw = mesh.get_meta("_bf_surface_material_paths", null)
+	var face_indices_raw = mesh.get_meta("_bf_surface_face_indices", null)
+	if not (paths_raw is Array) or not (face_indices_raw is Array):
+		return false
+	var surface_paths: Array = paths_raw
+	var surface_face_indices: Array = face_indices_raw
+	if surface_paths.size() != surf_count or surface_face_indices.size() != surf_count:
+		return false
+	var did_apply := false
+	for i in range(surf_count):
+		if int(surface_face_indices[i]) != face_index:
+			continue
+		surface_paths[i] = material_path
+		if material_path == "":
+			mesh.surface_set_material(i, null)
+		else:
+			var mat_res := _load_cached_material(material_path)
+			mesh.surface_set_material(i, mat_res if mat_res is Material else null)
+		did_apply = true
+	if did_apply:
+		mesh.set_meta("_bf_surface_material_paths", surface_paths)
+	return did_apply
+
+static func apply_preview_mode(mesh_res: Mesh, enabled: bool) -> bool:
+	if not (mesh_res is ArrayMesh):
+		return false
+	var mesh := mesh_res as ArrayMesh
+	var surf_count := mesh.get_surface_count()
+	if surf_count <= 0:
+		return true
+	if enabled:
+		var preview_mat := _get_preview_material()
+		for i in range(surf_count):
+			mesh.surface_set_material(i, preview_mat)
+		return true
+	var paths_raw = mesh.get_meta("_bf_surface_material_paths", null)
+	if not (paths_raw is Array):
+		return false
+	var paths: Array = paths_raw
+	if paths.size() != surf_count:
+		return false
+	for i in range(surf_count):
+		var material_path := str(paths[i])
+		if material_path == "":
+			mesh.surface_set_material(i, null)
+			continue
+		var mat_res := _load_cached_material(material_path)
+		if mat_res is Material:
+			mesh.surface_set_material(i, mat_res)
+		else:
+			mesh.surface_set_material(i, null)
+	return true
+
+static func _get_preview_material() -> StandardMaterial3D:
+	if _preview_material == null:
+		_preview_material = StandardMaterial3D.new()
+		_preview_material.vertex_color_use_as_albedo = true
+		_preview_material.albedo_color = Color.WHITE
+		_preview_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return _preview_material
+
+static func _load_cached_material(material_path: String) -> Material:
+	if material_path == "":
+		return null
+	if _material_resource_cache.has(material_path):
+		var cached = _material_resource_cache[material_path]
+		return cached as Material
+	var loaded = load(material_path)
+	if loaded is Material:
+		_material_resource_cache[material_path] = loaded
+		return loaded
+	return null
 
 static func get_brush_vertices_world(brush: BrushForge) -> Array[Vector3]:
 	if brush == null:
@@ -132,7 +245,35 @@ static func get_brush_vertices_world(brush: BrushForge) -> Array[Vector3]:
 	var planes: Array = brush.planes
 	return _compute_brush_vertices(planes)
 
+static func get_brush_face_hull(brush: BrushForge, face_index: int, epsilon: float = 0.02) -> Array[Vector3]:
+	if brush == null or face_index < 0 or face_index >= brush.planes.size():
+		var empty: Array[Vector3] = []
+		return empty
+	if BRUSH_MESH_NATIVE_BRIDGE_SCRIPT != null:
+		var native_hull := BRUSH_MESH_NATIVE_BRIDGE_SCRIPT.compute_face_hull(brush, face_index, epsilon)
+		if native_hull.size() >= 3:
+			return native_hull
+	var plane: NeoPlane = brush.planes[face_index] as NeoPlane
+	if plane == null:
+		var empty2: Array[Vector3] = []
+		return empty2
+	var vertices := get_brush_vertices_world(brush)
+	if vertices.is_empty():
+		var empty3: Array[Vector3] = []
+		return empty3
+	var face := _collect_face_vertices(plane, vertices)
+	if face.size() < 3:
+		return face
+	return _sort_face_vertices(face, plane.normal)
+
 static func _compute_brush_vertices(planes: Array) -> Array[Vector3]:
+	if BRUSH_MESH_NATIVE_BRIDGE_SCRIPT != null:
+		var native_vertices := BRUSH_MESH_NATIVE_BRIDGE_SCRIPT.compute_brush_vertices(planes)
+		if native_vertices.size() > 0:
+			return native_vertices
+	return _compute_brush_vertices_gd(planes)
+
+static func _compute_brush_vertices_gd(planes: Array) -> Array[Vector3]:
 	var out: Array[Vector3] = []
 	var eps := 0.001
 	for i in range(planes.size()):

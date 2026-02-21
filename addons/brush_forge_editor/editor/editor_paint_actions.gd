@@ -8,13 +8,13 @@ func paint_from_pick(plugin, camera: Camera3D, pick: Dictionary, mouse_pos: Vect
 		return
 	if target_index >= plugin.map_node.brush_data.size():
 		return
-	var meshes := plugin._get_brush_meshes()
+	var meshes: Array = plugin._get_brush_meshes()
 	if target_index >= meshes.size():
 		return
-	var target_mesh := meshes[target_index]
+	var target_mesh: MeshInstance3D = meshes[target_index] as MeshInstance3D
 	if target_mesh == null:
 		return
-	var precise_hit := plugin.EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(plugin.map_node, target_index, camera, mouse_pos)
+	var precise_hit: Dictionary = plugin.EDITOR_BRUSH_PICK_UTILS_SCRIPT.pick_exact_face_on_brush(plugin.map_node, target_index, camera, mouse_pos)
 	var hit: Vector3 = plugin._get_pick_hit_point_from_mouse(camera, pick, mouse_pos)
 	if not precise_hit.is_empty():
 		target_face = int(precise_hit.get("face_index", target_face))
@@ -25,7 +25,7 @@ func paint_from_pick(plugin, camera: Camera3D, pick: Dictionary, mouse_pos: Vect
 	plugin._select_face(target_face)
 	var radius := float(plugin.paint_radius_spinbox.value) if plugin.paint_radius_spinbox != null else 1.0
 	var strength := float(plugin.paint_strength_spinbox.value) if plugin.paint_strength_spinbox != null else 0.35
-	var col := plugin.paint_color_picker.color if plugin.paint_color_picker != null else Color.WHITE
+	var col: Color = plugin.paint_color_picker.color if plugin.paint_color_picker != null else Color.WHITE
 	var min_step: float = maxf(radius * 0.2, 0.005)
 	if plugin.paint_last_stamp == plugin.INVALID_STAMP_POINT:
 		paint_at_world_point(plugin, target_index, target_face, hit, col, radius, strength, false)
@@ -47,7 +47,7 @@ func paint_from_pick(plugin, camera: Camera3D, pick: Dictionary, mouse_pos: Vect
 	rebuild_painted_brush_mesh(plugin, target_index)
 
 func rebuild_painted_brush_mesh(plugin, brush_index: int) -> void:
-	var meshes := plugin._get_brush_meshes()
+	var meshes: Array = plugin._get_brush_meshes()
 	if brush_index < 0 or brush_index >= meshes.size():
 		return
 	if plugin.map_node == null or brush_index >= plugin.map_node.brush_data.size():
@@ -104,7 +104,7 @@ func handle_paint_tool_mouse_button(plugin, camera: Camera3D, mb: InputEventMous
 				plugin._end_history_action()
 			return plugin.AFTER_GUI_INPUT_STOP
 		return plugin.AFTER_GUI_INPUT_PASS
-	var pick := plugin._pick_brush_and_face(camera, mb.position)
+	var pick: Dictionary = plugin._pick_brush_and_face(camera, mb.position)
 	if pick.is_empty():
 		plugin.paint_hover_valid = false
 		plugin._update_gizmos()
@@ -116,7 +116,7 @@ func handle_paint_tool_mouse_button(plugin, camera: Camera3D, mb: InputEventMous
 	if plugin.paint_apply_mode_option != null and plugin.paint_apply_mode_option.get_selected_id() == plugin.PAINT_APPLY_BUCKET:
 		if not plugin.history_action_active:
 			plugin._begin_history_action()
-		var col := plugin.paint_color_picker.color if plugin.paint_color_picker != null else Color.WHITE
+		var col: Color = plugin.paint_color_picker.color if plugin.paint_color_picker != null else Color.WHITE
 		paint_fill_face(plugin, target_index, target_face, col)
 		plugin._end_history_action()
 		plugin.paint_drag_active = false
@@ -132,12 +132,12 @@ func handle_paint_tool_mouse_button(plugin, camera: Camera3D, mb: InputEventMous
 	return plugin.AFTER_GUI_INPUT_STOP
 
 func handle_paint_tool_mouse_motion(plugin, camera: Camera3D, mm: InputEventMouseMotion) -> int:
-	var pick := plugin._pick_brush_and_face(camera, mm.position)
+	var pick: Dictionary = plugin._pick_brush_and_face(camera, mm.position)
 	if pick.is_empty():
 		plugin.paint_hover_valid = false
 		plugin._update_gizmos()
 		return plugin.AFTER_GUI_INPUT_PASS
-	var hit := plugin._get_pick_hit_point_from_mouse(camera, pick, mm.position)
+	var hit: Vector3 = plugin._get_pick_hit_point_from_mouse(camera, pick, mm.position)
 	plugin.paint_hover_valid = true
 	plugin.paint_hover_point = hit
 	if plugin.paint_drag_active:
