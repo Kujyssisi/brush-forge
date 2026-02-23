@@ -1,11 +1,10 @@
 [gd_resource type="ShaderMaterial" format=3 uid="uid://ndm153cu3gjv"]
 
 [ext_resource type="Shader" path="res://addons/brush_forge_editor/helpers/VertexTexture.gdshader" id="1_jrw1p"]
-[ext_resource type="Texture2D" uid="uid://br85e76vxf5dc" path="res://resources/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_Displacement.jpg" id="2_jrw1p"]
-[ext_resource type="Texture2D" uid="uid://dlfbvx5flltkk" path="res://resources/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_Color.jpg" id="3_ya8ex"]
-[ext_resource type="Texture2D" uid="uid://cdj87c02y2rvw" path="res://resources/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_AmbientOcclusion.jpg" id="4_jk0y3"]
-[ext_resource type="Texture2D" uid="uid://c1o4efrxfhc0i" path="res://resources/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_NormalGL.jpg" id="5_tob4f"]
-[ext_resource type="Texture2D" uid="uid://d1gk6to74iocn" path="res://resources/Textures/Bricks097_2K-JPG/Bricks097_2K-JPG_Roughness.jpg" id="6_86wes"]
+[ext_resource type="Texture2D" uid="uid://nqxpgn3dnua2" path="res://resources/Textures/Bricks074_2K-JPG/Bricks074_2K-JPG_Color.jpg" id="2_7btyq"]
+[ext_resource type="Texture2D" uid="uid://ckm567io1od2y" path="res://resources/Textures/Bricks074_2K-JPG/Bricks074_2K-JPG_AmbientOcclusion.jpg" id="3_jrw1p"]
+[ext_resource type="Texture2D" uid="uid://c8o0fylh080k2" path="res://resources/Textures/Bricks074_2K-JPG/Bricks074_2K-JPG_NormalGL.jpg" id="4_ya8ex"]
+[ext_resource type="Texture2D" uid="uid://ctckhfu87r1rf" path="res://resources/Textures/Bricks074_2K-JPG/Bricks074_2K-JPG_Roughness.jpg" id="5_jk0y3"]
 [ext_resource type="Texture2D" uid="uid://c86quhk3rrwhv" path="res://resources/Textures/Concrete034_2K-PNG/Concrete034_2K-PNG_Color.png" id="7_dyj8k"]
 [ext_resource type="Texture2D" uid="uid://bny4liw5kkkhn" path="res://resources/Textures/Concrete034_2K-PNG/Concrete034_2K-PNG_NormalGL.png" id="8_j46r8"]
 [ext_resource type="Texture2D" uid="uid://bxpqrqfdyknma" path="res://resources/Textures/Concrete034_2K-PNG/Concrete034_2K-PNG_Roughness.png" id="9_l5n77"]
@@ -24,16 +23,16 @@ seamless = true
 render_priority = 0
 shader = ExtResource("1_jrw1p")
 shader_parameter/use_texture_black = true
-shader_parameter/texture_black_albedo = ExtResource("3_ya8ex")
+shader_parameter/texture_black_albedo = ExtResource("2_7btyq")
 shader_parameter/texture_black_color = Color(1, 1, 1, 1)
-shader_parameter/texture_black_ao = ExtResource("4_jk0y3")
+shader_parameter/texture_black_ao = ExtResource("3_jrw1p")
 shader_parameter/texture_black_ao_intensity = 1.0
 shader_parameter/texture_black_metallic_intensity = 0.0
-shader_parameter/texture_black_roughness = ExtResource("6_86wes")
+shader_parameter/texture_black_roughness = ExtResource("5_jk0y3")
 shader_parameter/texture_black_roughness_intensity = 1.0
-shader_parameter/texture_black_normal = ExtResource("5_tob4f")
+shader_parameter/texture_black_normal = ExtResource("4_ya8ex")
 shader_parameter/texture_black_normal_intensity = 1.0
-shader_parameter/texture_black_scale = Vector2(2, 2)
+shader_parameter/texture_black_scale = Vector2(1, 1)
 shader_parameter/use_texture_r = true
 shader_parameter/texture_r_albedo = ExtResource("7_dyj8k")
 shader_parameter/texture_r_color = Color(1, 1, 1, 1)
@@ -67,8 +66,8 @@ shader_parameter/texture_white_normal_intensity = 1.0
 shader_parameter/texture_white_scale = Vector2(1, 1)
 shader_parameter/use_noise_blending = true
 shader_parameter/blend_noise_texture = SubResource("NoiseTexture2D_obt1j")
-shader_parameter/blend_height_texture = ExtResource("2_jrw1p")
+shader_parameter/blend_height_texture = ExtResource("2_7btyq")
 shader_parameter/blend_height_intensity = 20.0
-shader_parameter/contrast0 = 2.425
+shader_parameter/contrast0 = 3.0
 shader_parameter/blend_noise_scale = Vector2(2, 2)
-shader_parameter/blend_height_scale = Vector2(2, 2)
+shader_parameter/blend_height_scale = Vector2(1, 1)

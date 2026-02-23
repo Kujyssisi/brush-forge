@@ -2,8 +2,8 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://b2i00b36gyjd7"
-path.s3tc="res://.godot/imported/Bricks074_2K-JPG_NormalDX.jpg-1c3f5933dbeb0bcde3eb6f0d66a4e1a5.s3tc.ctex"
+uid="uid://cx31n8jfxjbt4"
+path.s3tc="res://.godot/imported/SprayPaintByKj.png-885585285f33a755613891596c4d09dc.s3tc.ctex"
 metadata={
 "imported_formats": ["s3tc_bptc"],
 "vram_texture": true
@@ -11,8 +11,8 @@ metadata={
 
 [deps]
 
-source_file="res://resources/Textures/Bricks074_2K-JPG/Bricks074_2K-JPG_NormalDX.jpg"
-dest_files=["res://.godot/imported/Bricks074_2K-JPG_NormalDX.jpg-1c3f5933dbeb0bcde3eb6f0d66a4e1a5.s3tc.ctex"]
+source_file="res://resources/Textures/Decals/SprayPaintByKj.png"
+dest_files=["res://.godot/imported/SprayPaintByKj.png-885585285f33a755613891596c4d09dc.s3tc.ctex"]
 
 [params]
 
